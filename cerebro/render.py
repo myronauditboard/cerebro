@@ -28,14 +28,13 @@ RESET = f"{CSI}0m"
 
 
 def fmt_count(n: int) -> str:
-    """Compact human-readable count with up to 2 decimals (trailing zeros trimmed).
+    """Compact human-readable count with exactly 2 decimals for consistency.
 
-    1_180_000 → "1.18M" · 12_400_000 → "12.4M" · 12_000_000 → "12M" · 999_990 → "999.99K"
+    1_180_000 → "1.18M" · 12_400_000 → "12.40M" · 12_000_000 → "12.00M" · 999_990 → "999.99K"
     """
     for unit, divisor in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
         if abs(n) >= divisor:
-            s = f"{n / divisor:.2f}".rstrip("0").rstrip(".")
-            return f"{s}{unit}"
+            return f"{n / divisor:.2f}{unit}"
     return str(int(n))
 
 
