@@ -24,13 +24,15 @@ RESET = f"{CSI}0m"
 
 
 def fmt_count(n: int) -> str:
-    if n >= 1_000_000_000:
-        return f"{n / 1_000_000_000:.1f}B"
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return str(n)
+    """Compact human-readable count with up to 2 decimals (trailing zeros trimmed).
+
+    1_180_000 → "1.18M" · 12_400_000 → "12.4M" · 12_000_000 → "12M" · 999_990 → "999.99K"
+    """
+    for unit, divisor in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+        if abs(n) >= divisor:
+            s = f"{n / divisor:.2f}".rstrip("0").rstrip(".")
+            return f"{s}{unit}"
+    return str(int(n))
 
 
 def _truncate(s: str, n: int) -> str:
@@ -61,11 +63,11 @@ def render_summary(summary: TokenSummary, width: int) -> list[str]:
     def line(b: Bucket) -> str:
         return (
             f"  {b.label.capitalize():<9}"
-            f"raw {fmt_count(b.raw_input_tokens):>5}  ·  "
-            f"cache {fmt_count(b.cache_tokens):>6}  ·  "
-            f"out {fmt_count(b.output_tokens):>6}  ·  "
-            f"billable {fmt_count(b.billable_tokens):>6}  ·  "
-            f"{b.msgs:>4} msg  ·  {b.sessions:>3} sess"
+            f"raw {fmt_count(b.raw_input_tokens):>7} · "
+            f"cache {fmt_count(b.cache_tokens):>7} · "
+            f"out {fmt_count(b.output_tokens):>7} · "
+            f"bill {fmt_count(b.billable_tokens):>7} · "
+            f"{b.msgs:>4} msg · {b.sessions:>3} sess"
         )
 
     return _panel(
@@ -86,7 +88,7 @@ def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
     most_day = sc.most_active_day.strftime("%b %-d") if sc.most_active_day else "—"
     first_d = sc.first_session_date.strftime("%b %-d, %Y") if sc.first_session_date else "—"
     line1 = (
-        f"  Total tokens   {fmt_count(sc.total_tokens):>6}"
+        f"  Total tokens   {fmt_count(sc.total_tokens):>7}"
         f"   ·   Total messages  {sc.total_messages:>5}"
         f"   ·   Sessions  {sc.total_sessions}"
     )
