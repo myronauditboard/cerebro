@@ -93,6 +93,21 @@ def render_summary(summary: TokenSummary, width: int) -> list[str]:
     )
 
 
+# Column widths for the table-style Stats and /usage panels.
+_TBL_LABEL = 16
+_TBL_NUM = 10
+
+
+def _table_row(label: str, tokens: str, msgs: str, sess: str, detail: str = "") -> str:
+    base = (
+        f"  {label:<{_TBL_LABEL}}"
+        f"{tokens:>{_TBL_NUM}}  "
+        f"{msgs:>{_TBL_NUM}}  "
+        f"{sess:>{_TBL_NUM}}"
+    )
+    return f"{base}   {detail}" if detail else base
+
+
 def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
     inner = max(60, width - 2)
     if not sc.available:
@@ -103,25 +118,37 @@ def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
         )
     most_day = sc.most_active_day.strftime("%b %-d") if sc.most_active_day else "—"
     first_d = sc.first_session_date.strftime("%b %-d, %Y") if sc.first_session_date else "—"
-    line_today = (
-        f"  Today          {fmt_count(sc.today_tokens):>7}"
-        f"   ·   Messages         {sc.today_messages:>5}"
-        f"   ·   Sessions  {sc.today_sessions}"
-    )
-    line_total = (
-        f"  Total tokens   {fmt_count(sc.total_tokens):>7}"
-        f"   ·   Total messages  {sc.total_messages:>5}"
-        f"   ·   Sessions  {sc.total_sessions}"
-    )
-    line_fav = (
-        f"  Favorite model {sc.favorite_model}  ({fmt_count(sc.favorite_model_tokens)} tokens)"
-    )
-    line_active = (
-        f"  Most active    {most_day}  ({fmt_count(sc.most_active_day_tokens)} tokens)"
-        f"   ·   Streak  {sc.current_streak}d"
-        f"   ·   Since  {first_d}"
-    )
-    return _panel("/usage", [line_today, line_total, line_fav, line_active], inner)
+    rows = [
+        _table_row("Period", "Tokens", "Messages", "Sessions"),
+        _table_row(
+            "Today",
+            fmt_count(sc.today_tokens),
+            str(sc.today_messages),
+            str(sc.today_sessions),
+        ),
+        _table_row(
+            "Total",
+            fmt_count(sc.total_tokens),
+            str(sc.total_messages),
+            str(sc.total_sessions),
+            f"since {first_d}",
+        ),
+        _table_row(
+            "Most active",
+            fmt_count(sc.most_active_day_tokens),
+            "—",
+            "—",
+            f"{most_day}, streak {sc.current_streak}d",
+        ),
+        _table_row(
+            "Favorite model",
+            fmt_count(sc.favorite_model_tokens),
+            "—",
+            "—",
+            sc.favorite_model,
+        ),
+    ]
+    return _panel("/usage", rows, inner)
 
 
 def render_activity(summary: TokenSummary, width: int) -> list[str]:
@@ -133,16 +160,30 @@ def render_activity(summary: TokenSummary, width: int) -> list[str]:
     most_day = act.most_active_day.strftime("%b %-d") if act.most_active_day else "—"
     most_n = fmt_count(act.most_active_day_billable) if act.most_active_day_billable else "0"
     streak = act.current_streak
-    line_today = (
-        f"  Today            {fmt_count(today.billable_tokens):>7} billable"
-        f"  ·  {today.msgs:>4} msg"
-        f"  ·  {today.sessions:>2} sess"
-    )
-    line_fav = f"  Favorite model   {fav_label}  ({fav_n} out tokens)"
-    line_active = (
-        f"  Most active day  {most_day}  ({most_n} billable)   ·   Streak  {streak}d"
-    )
-    return _panel("Stats", [line_today, line_fav, line_active], inner)
+    rows = [
+        _table_row("Period", "Billable", "Messages", "Sessions"),
+        _table_row(
+            "Today",
+            fmt_count(today.billable_tokens),
+            str(today.msgs),
+            str(today.sessions),
+        ),
+        _table_row(
+            "Most active",
+            most_n,
+            "—",
+            "—",
+            f"{most_day}, streak {streak}d",
+        ),
+        _table_row(
+            "Favorite model",
+            f"{fav_n} out",
+            "—",
+            "—",
+            fav_label,
+        ),
+    ]
+    return _panel("Stats", rows, inner)
 
 
 def render_table(sessions: Sequence[Session], width: int) -> list[str]:
