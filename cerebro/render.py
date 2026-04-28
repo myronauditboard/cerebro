@@ -9,7 +9,7 @@ import time
 from typing import Sequence
 
 from .sessions import Session, list_sessions
-from .tokens import Bucket, TokenAggregator, TokenSummary
+from .tokens import ActivityStats, Bucket, TokenAggregator, TokenSummary
 
 
 CSI = "\033["
@@ -40,25 +40,50 @@ def _truncate(s: str, n: int) -> str:
     return s[: n - 1] + "…"
 
 
-def render_summary(summary: TokenSummary, width: int) -> list[str]:
-    inner = max(40, width - 2)
-    title = " Tokens "
-    pad = (inner - len(title)) // 2
-    top = "┌" + "─" * pad + title + "─" * (inner - pad - len(title)) + "┐"
+def _panel(title: str, lines: list[str], inner: int) -> list[str]:
+    pad = (inner - len(title) - 2) // 2
+    top = "┌" + "─" * pad + f" {title} " + "─" * (inner - pad - len(title) - 2) + "┐"
     bot = "└" + "─" * inner + "┘"
+    out = [top]
+    for ln in lines:
+        # Strip ANSI for length calc, but we don't generate ANSI inside body so len() is fine
+        if len(ln) > inner:
+            ln = ln[:inner]
+        out.append("│" + ln.ljust(inner) + "│")
+    out.append(bot)
+    return out
+
+
+def render_summary(summary: TokenSummary, width: int) -> list[str]:
+    inner = max(60, width - 2)
 
     def line(b: Bucket) -> str:
-        body = (
-            f"  {b.label.capitalize():<8} "
-            f"{fmt_count(b.input_tokens):>7} in   ·   "
-            f"{fmt_count(b.output_tokens):>6} out   ·   "
-            f"{b.msgs:>5} msgs across {b.sessions:>3} sessions"
+        return (
+            f"  {b.label.capitalize():<9}"
+            f"raw {fmt_count(b.raw_input_tokens):>5}  ·  "
+            f"cache {fmt_count(b.cache_tokens):>6}  ·  "
+            f"out {fmt_count(b.output_tokens):>6}  ·  "
+            f"billable {fmt_count(b.billable_tokens):>6}  ·  "
+            f"{b.msgs:>4} msg  ·  {b.sessions:>3} sess"
         )
-        if len(body) > inner:
-            body = body[:inner]
-        return "│" + body.ljust(inner) + "│"
 
-    return [top, line(summary.today), line(summary.week), line(summary.lifetime), bot]
+    return _panel(
+        "Tokens",
+        [line(summary.today), line(summary.week), line(summary.lifetime)],
+        inner,
+    )
+
+
+def render_activity(act: ActivityStats, width: int) -> list[str]:
+    inner = max(60, width - 2)
+    fav_label = act.favorite_model or "—"
+    fav_n = fmt_count(act.favorite_model_output) if act.favorite_model_output else "0"
+    most_day = act.most_active_day.strftime("%b %-d") if act.most_active_day else "—"
+    most_n = fmt_count(act.most_active_day_billable) if act.most_active_day_billable else "0"
+    streak = act.current_streak
+    line1 = f"  Favorite model   {fav_label}  ({fav_n} out tokens)"
+    line2 = f"  Most active day  {most_day}  ({most_n} billable)   ·   Streak  {streak}d"
+    return _panel("Stats", [line1, line2], inner)
 
 
 def render_table(sessions: Sequence[Session], width: int) -> list[str]:
@@ -104,6 +129,7 @@ def render_frame(summary: TokenSummary, sessions: Sequence[Session], width: int)
     blocks.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
     blocks.append("")
     blocks.extend(render_summary(summary, width))
+    blocks.extend(render_activity(summary.activity, width))
     blocks.append("")
     blocks.extend(render_table(sessions, width))
     blocks.append("")

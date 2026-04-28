@@ -9,16 +9,19 @@ sessions.
 ```
 cerebro — claude code activity
 
-┌────────────────────── Tokens ──────────────────────┐
-│  Today      62.7M in   ·  383.7K out   ·   350 msgs across  3 sessions │
-│  Week      407.9M in   ·    2.3M out   ·  2040 msgs across 12 sessions │
-│  Lifetime    1.0B in   ·    3.6M out   ·  5998 msgs across 57 sessions │
-└────────────────────────────────────────────────────┘
+┌─────────────────────────────────── Tokens ─────────────────────────────────────┐
+│  Today    raw   908 · cache  89.8M · out 561K  · billable 562K  ·  463 msg ... │
+│  Week     raw 13.7K · cache 435.0M · out 2.5M  · billable 2.5M  · 2153 msg ... │
+│  Lifetime raw 29.4K · cache   1.0B · out 3.8M  · billable 3.8M  · 6111 msg ... │
+└────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────── Stats ──────────────────────────────────────┐
+│  Favorite model   claude-opus-4-7  (2.8M out tokens)                           │
+│  Most active day  Apr 24  (1.5M billable)   ·   Streak  1d                     │
+└────────────────────────────────────────────────────────────────────────────────┘
 
    PID    AGE     REPO                 BRANCH                       TTY      SESSION
 *  21554  4d19h   auditboard-backend   auto-annotate-database-v0    ttys020  4cb31d70…
    5063   4d20h   auditboard-frontend  auto-annotate-database-v0    ttys011  -
-   24953  11d16h  auditboard-backend   develop                      ttys013  -
    ...
 
   ctrl-C to exit
@@ -26,6 +29,21 @@ cerebro — claude code activity
 
 `*` marks the session whose process tree contains the cerebro you launched
 (works when invoked via `! cerebro` from inside a Claude session).
+
+### Token columns
+
+| Column | Meaning |
+|---|---|
+| `raw` | Raw input tokens (no cache reads, no cache writes) |
+| `cache` | `cache_creation_input_tokens + cache_read_input_tokens` |
+| `out` | Output tokens |
+| `billable` | `raw + out` — same definition as `/usage`'s "Total tokens" |
+
+The `billable` column is the one to compare against the `/usage` Stats screen
+inside Claude Code. Cerebro and `/usage` may still differ by a few percent
+because `/usage` reads from a precomputed cache (`~/.claude/stats-cache.json`)
+that doesn't always re-derive completed days, whereas cerebro re-reads the
+jsonl files every refresh.
 
 ## Install
 

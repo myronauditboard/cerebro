@@ -90,9 +90,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd == "tokens":
-        from .render import render_summary, _terminal_size  # noqa: PLC0415
+        from .render import render_activity, render_summary, _terminal_size  # noqa: PLC0415
         cols, _ = _terminal_size()
-        for line in render_summary(TokenAggregator().summarize(), cols):
+        summary = TokenAggregator().summarize()
+        for line in render_summary(summary, cols):
+            print(line)
+        for line in render_activity(summary.activity, cols):
             print(line)
         return 0
 
