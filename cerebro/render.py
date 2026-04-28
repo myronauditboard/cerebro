@@ -298,7 +298,7 @@ def render_frame(
     out.append("")
     out.append(
         DIM
-        + "  click a tab or press [1]/[2]  ·  [r] refresh  ·  [q] quit"
+        + "  click a tab or [1]/[2]  ·  ↑↓ / wheel scroll  ·  [r] refresh  ·  [q] quit"
         + RESET
     )
     return "\n".join(out)
@@ -313,6 +313,7 @@ def _terminal_size() -> tuple[int, int]:
 
 
 _SGR_MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+_CSI_KEY_RE = re.compile(rb"\x1b\[([0-9;]*)([A-Za-z~])")
 
 
 def _read_input(fd: int, timeout: float) -> bytes | None:
@@ -330,27 +331,83 @@ def _read_input(fd: int, timeout: float) -> bytes | None:
 
 
 def _parse_input(buf: bytes):
-    """Yield ('key', char) and ('mouse', button, col, row, press) events from a raw buffer."""
+    """Yield input events from a raw buffer.
+
+    Event tuples:
+      ('key',   ch)                                — single character keystroke
+      ('csi',   "A" | "B" | "5~" | ... )           — non-mouse CSI sequence (arrows, pgup, etc.)
+      ('mouse', button, col, row, press_bool)      — SGR mouse event
+    """
     i = 0
     n = len(buf)
     while i < n:
+        # SGR mouse event has the form ESC [ < ...
         if buf[i : i + 3] == b"\x1b[<":
             m = _SGR_MOUSE_RE.match(buf, i)
             if m:
-                button = int(m.group(1))
-                col = int(m.group(2))
-                row = int(m.group(3))
-                press = m.group(4) == b"M"
-                yield ("mouse", button, col, row, press)
+                yield (
+                    "mouse",
+                    int(m.group(1)),
+                    int(m.group(2)),
+                    int(m.group(3)),
+                    m.group(4) == b"M",
+                )
                 i = m.end()
                 continue
-        # Any other byte is treated as a regular keystroke. Multi-byte ESC sequences
-        # we don't recognize will degrade gracefully (the leading ESC becomes a
-        # standalone "key" event the handler ignores).
+        # Any other CSI sequence (arrows, page up/down, home/end, function keys)
+        if buf[i : i + 2] == b"\x1b[":
+            m = _CSI_KEY_RE.match(buf, i)
+            if m:
+                yield ("csi", (m.group(1) + m.group(2)).decode("ascii", errors="ignore"))
+                i = m.end()
+                continue
+        # Otherwise: regular keystroke
         ch = buf[i : i + 1].decode("utf-8", errors="ignore")
         if ch:
             yield ("key", ch)
         i += 1
+
+
+# Top sticky lines: title (0), tab header (1), blank (2)
+# Bottom sticky lines: blank (-2), footer (-1)
+_STICKY_TOP = 3
+_STICKY_BOTTOM = 2
+
+
+def _apply_scroll(frame: str, term_rows: int, offset: int) -> tuple[str, int, int]:
+    """Slice the rendered frame so it fits in `term_rows`, keeping the top 3 lines and
+    bottom 2 lines sticky. Returns (rendered_string, clamped_offset, max_offset).
+    """
+    lines = frame.split("\n")
+    if term_rows <= 0 or len(lines) <= term_rows:
+        return frame, 0, 0
+
+    top = lines[:_STICKY_TOP]
+    bottom = lines[-_STICKY_BOTTOM:]
+    body = lines[_STICKY_TOP:-_STICKY_BOTTOM]
+
+    avail = term_rows - len(top) - len(bottom)
+    if avail <= 0:
+        return "\n".join(top + bottom), 0, 0
+
+    max_offset = max(0, len(body) - avail)
+    clamped = max(0, min(offset, max_offset))
+    visible = body[clamped : clamped + avail]
+
+    # Append a "[N hidden ↑ / M hidden ↓]" indicator to the footer when scrolled
+    if max_offset > 0:
+        above = clamped
+        below = len(body) - clamped - avail
+        marks = []
+        if above > 0:
+            marks.append(f"↑{above}")
+        if below > 0:
+            marks.append(f"↓{below}")
+        indicator = "  " + DIM + f"({' '.join(marks)} hidden)" + RESET
+        bottom = list(bottom)
+        bottom[-1] = bottom[-1] + indicator
+
+    return "\n".join(top + visible + bottom), clamped, max_offset
 
 
 def live(interval: float, include_branch: bool = True, tab: str = "overview") -> None:
@@ -378,6 +435,9 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
             old_settings = None
 
     tab_ranges = tab_layout()
+    # Per-tab scroll offset so switching back to a tab restores its position.
+    scroll_offsets: dict[str, int] = {name: 0 for name in TABS}
+    last_term_rows = {"v": 24}
 
     def _switch(new_tab: str) -> None:
         nonlocal tab
@@ -385,13 +445,23 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
             tab = new_tab
             needs_redraw["flag"] = True
 
+    def _scroll(delta: int) -> None:
+        scroll_offsets[tab] = max(0, scroll_offsets[tab] + delta)
+        needs_redraw["flag"] = True
+
+    def _scroll_to(pos: int | None) -> None:
+        # None == bottom (resolved against actual content during render)
+        scroll_offsets[tab] = pos if pos is not None else 1_000_000
+        needs_redraw["flag"] = True
+
     sys.stdout.write(HIDE_CURSOR)
     if fd is not None:
         sys.stdout.write(MOUSE_ON)
     sys.stdout.flush()
     try:
         while True:
-            cols, _ = _terminal_size()
+            cols, term_rows = _terminal_size()
+            last_term_rows["v"] = term_rows
             summary = aggregator.summarize()
             sessions = list_sessions(include_branch=include_branch)
             stats_cache = sc_mod.load()
@@ -404,7 +474,9 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 agents=agents,
                 width=cols,
             )
-            sys.stdout.write(HOME + CLEAR_TO_END + frame)
+            view, clamped, _max_offset = _apply_scroll(frame, term_rows, scroll_offsets[tab])
+            scroll_offsets[tab] = clamped
+            sys.stdout.write(HOME + CLEAR_TO_END + view)
             sys.stdout.flush()
             needs_redraw["flag"] = False
             # Wait for either input or the refresh interval, whichever comes first
@@ -418,8 +490,10 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 if not buf:
                     slept += slice_s
                     continue
+                page = max(1, last_term_rows["v"] // 2)
                 for event in _parse_input(buf):
-                    if event[0] == "key":
+                    kind = event[0]
+                    if kind == "key":
                         ch = event[1]
                         if ch in ("q", "Q", "\x03"):
                             raise KeyboardInterrupt
@@ -431,13 +505,45 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                             needs_redraw["flag"] = True
                         elif ch == "\t":
                             _switch("agents" if tab == "overview" else "overview")
-                    elif event[0] == "mouse":
+                        elif ch == "j":
+                            _scroll(1)
+                        elif ch == "k":
+                            _scroll(-1)
+                        elif ch == "g":
+                            _scroll_to(0)
+                        elif ch == "G":
+                            _scroll_to(None)
+                        elif ch == "\x04":      # ctrl-D
+                            _scroll(page)
+                        elif ch == "\x15":      # ctrl-U
+                            _scroll(-page)
+                    elif kind == "csi":
+                        seq = event[1]
+                        if seq == "A":
+                            _scroll(-1)
+                        elif seq == "B":
+                            _scroll(1)
+                        elif seq == "5~":
+                            _scroll(-page)
+                        elif seq == "6~":
+                            _scroll(page)
+                        elif seq == "H":
+                            _scroll_to(0)
+                        elif seq == "F":
+                            _scroll_to(None)
+                    elif kind == "mouse":
                         _, button, col, row, press = event
-                        if press and button == 0 and row == TAB_ROW:
+                        if not press:
+                            continue
+                        if button == 0 and row == TAB_ROW:
                             for c_start, c_end, name in tab_ranges:
                                 if c_start <= col <= c_end:
                                     _switch(name)
                                     break
+                        elif button == 64:    # wheel up
+                            _scroll(-3)
+                        elif button == 65:    # wheel down
+                            _scroll(3)
     except KeyboardInterrupt:
         pass
     finally:

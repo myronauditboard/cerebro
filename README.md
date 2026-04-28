@@ -94,11 +94,18 @@ cerebro help                    # usage
 **Live nav**: click a tab in the header (mouse), or press `1`/`2`/`tab` (keyboard).
 `r` forces a refresh, `q` quits.
 
+**Scrolling** (when content exceeds the terminal height): mouse wheel,
+arrow keys, page up/down, `home`/`end`, or vim-style `j`/`k`/`g`/`G` /
+`ctrl-d`/`ctrl-u`. The title + tab header stay pinned at the top and the
+footer stays pinned at the bottom; only the middle scrolls. A small
+`(↑N ↓M hidden)` indicator appears in the footer when content is offscreen.
+Each tab keeps its own scroll position.
+
 The tab header mirrors Claude Code's `/usage` style — the active tab gets a
-filled background block, inactive tabs are dim. Mouse click support uses SGR
-mouse mode (modes 1000+1006) which most modern terminals (iTerm2, recent
-macOS Terminal.app, Kitty, Alacritty, Ghostty) handle natively. If your
-terminal doesn't, keyboard nav still works.
+filled background block, inactive tabs are dim. Mouse click and wheel support
+uses SGR mouse mode (modes 1000+1006), which most modern terminals (iTerm2,
+recent macOS Terminal.app, Kitty, Alacritty, Ghostty) handle natively. If
+yours doesn't, keyboard nav still works.
 
 ## Agents tab
 
