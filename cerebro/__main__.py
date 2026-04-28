@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = TokenAggregator().summarize()
         for line in render_summary(summary, cols):
             print(line)
-        for line in render_activity(summary.activity, cols):
+        for line in render_activity(summary, cols):
             print(line)
         for line in render_stats_cache(sc_mod.load(), cols):
             print(line)

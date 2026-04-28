@@ -29,6 +29,9 @@ class StatsCacheSummary:
     current_streak: int
     first_session_date: date | None
     last_computed: date | None
+    today_tokens: int           # today's entry from dailyModelTokens (0 if no entry yet)
+    today_messages: int         # today's messageCount from dailyActivity (0 if absent)
+    today_sessions: int         # today's sessionCount from dailyActivity (0 if absent)
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +46,9 @@ class StatsCacheSummary:
             "current_streak": self.current_streak,
             "first_session_date": self.first_session_date.isoformat() if self.first_session_date else None,
             "last_computed": self.last_computed.isoformat() if self.last_computed else None,
+            "today_tokens": self.today_tokens,
+            "today_messages": self.today_messages,
+            "today_sessions": self.today_sessions,
         }
 
 
@@ -59,6 +65,9 @@ def _empty(available: bool = False) -> StatsCacheSummary:
         current_streak=0,
         first_session_date=None,
         last_computed=None,
+        today_tokens=0,
+        today_messages=0,
+        today_sessions=0,
     )
 
 
@@ -123,6 +132,20 @@ def load() -> StatsCacheSummary:
         streak += 1
         cur -= timedelta(days=1)
 
+    today_iso = today_d.isoformat()
+    today_tokens = sum(
+        sum(e.get("tokensByModel", {}).values())
+        for e in daily_tokens
+        if e.get("date") == today_iso
+    )
+    today_msgs = 0
+    today_sessions = 0
+    for e in activity:
+        if e.get("date") == today_iso:
+            today_msgs = int(e.get("messageCount") or 0)
+            today_sessions = int(e.get("sessionCount") or 0)
+            break
+
     return StatsCacheSummary(
         available=True,
         total_tokens=total_tokens,
@@ -135,4 +158,7 @@ def load() -> StatsCacheSummary:
         current_streak=streak,
         first_session_date=_parse_iso_date(d.get("firstSessionDate")),
         last_computed=_parse_iso_date(d.get("lastComputedDate")),
+        today_tokens=today_tokens,
+        today_messages=today_msgs,
+        today_sessions=today_sessions,
     )

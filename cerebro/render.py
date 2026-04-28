@@ -97,38 +97,52 @@ def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
     inner = max(60, width - 2)
     if not sc.available:
         return _panel(
-            "/usage parity",
+            "/usage",
             ["  (~/.claude/stats-cache.json not found)"],
             inner,
         )
     most_day = sc.most_active_day.strftime("%b %-d") if sc.most_active_day else "—"
     first_d = sc.first_session_date.strftime("%b %-d, %Y") if sc.first_session_date else "—"
-    line1 = (
+    line_today = (
+        f"  Today          {fmt_count(sc.today_tokens):>7}"
+        f"   ·   Messages         {sc.today_messages:>5}"
+        f"   ·   Sessions  {sc.today_sessions}"
+    )
+    line_total = (
         f"  Total tokens   {fmt_count(sc.total_tokens):>7}"
         f"   ·   Total messages  {sc.total_messages:>5}"
         f"   ·   Sessions  {sc.total_sessions}"
     )
-    line2 = (
+    line_fav = (
         f"  Favorite model {sc.favorite_model}  ({fmt_count(sc.favorite_model_tokens)} tokens)"
     )
-    line3 = (
+    line_active = (
         f"  Most active    {most_day}  ({fmt_count(sc.most_active_day_tokens)} tokens)"
         f"   ·   Streak  {sc.current_streak}d"
         f"   ·   Since  {first_d}"
     )
-    return _panel("/usage parity", [line1, line2, line3], inner)
+    return _panel("/usage", [line_today, line_total, line_fav, line_active], inner)
 
 
-def render_activity(act: ActivityStats, width: int) -> list[str]:
+def render_activity(summary: TokenSummary, width: int) -> list[str]:
     inner = max(60, width - 2)
+    act = summary.activity
+    today = summary.today
     fav_label = act.favorite_model or "—"
     fav_n = fmt_count(act.favorite_model_output) if act.favorite_model_output else "0"
     most_day = act.most_active_day.strftime("%b %-d") if act.most_active_day else "—"
     most_n = fmt_count(act.most_active_day_billable) if act.most_active_day_billable else "0"
     streak = act.current_streak
-    line1 = f"  Favorite model   {fav_label}  ({fav_n} out tokens)"
-    line2 = f"  Most active day  {most_day}  ({most_n} billable)   ·   Streak  {streak}d"
-    return _panel("Stats", [line1, line2], inner)
+    line_today = (
+        f"  Today            {fmt_count(today.billable_tokens):>7} billable"
+        f"  ·  {today.msgs:>4} msg"
+        f"  ·  {today.sessions:>2} sess"
+    )
+    line_fav = f"  Favorite model   {fav_label}  ({fav_n} out tokens)"
+    line_active = (
+        f"  Most active day  {most_day}  ({most_n} billable)   ·   Streak  {streak}d"
+    )
+    return _panel("Stats", [line_today, line_fav, line_active], inner)
 
 
 def render_table(sessions: Sequence[Session], width: int) -> list[str]:
@@ -237,7 +251,7 @@ def render_overview(
 ) -> list[str]:
     blocks: list[str] = []
     blocks.extend(render_summary(summary, width))
-    blocks.extend(render_activity(summary.activity, width))
+    blocks.extend(render_activity(summary, width))
     blocks.extend(render_stats_cache(stats_cache, width))
     blocks.append("")
     blocks.extend(render_table(sessions, width))
