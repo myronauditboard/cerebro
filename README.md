@@ -79,15 +79,42 @@ To remove: `./uninstall.sh`.
 ## Usage
 
 ```bash
-cerebro                         # live dashboard (default), refreshes every 2s
+cerebro                         # live dashboard (overview tab), refreshes every 2s
+cerebro --tab agents            # live dashboard, agents tab
 cerebro -n 5                    # 5s refresh
 cerebro --once                  # render one frame and exit
 cerebro --no-branch             # skip per-session git branch lookup
-cerebro sessions                # one-shot session table only
-cerebro tokens                  # one-shot token summary only
+cerebro sessions                # one-shot session table
+cerebro tokens                  # one-shot token summary
+cerebro agents                  # one-shot per-session detail
 cerebro --once --json | jq      # machine-readable
 cerebro help                    # usage
 ```
+
+**Live keys**:  `1` overview · `2` agents · `tab` cycle · `r` refresh · `q` quit
+
+## Agents tab
+
+The agents tab opens a per-session detail view: for every running `claude`
+process, cerebro reads `~/.claude/sessions/<pid>.json` for the auto-named
+session label, then tails the corresponding jsonl in `~/.claude/projects/`
+to extract what each session is currently doing.
+
+```
+* PID 21554  [working]  last activity 2s ago
+    ml-auto-annotate-tachyon-stack
+    auditboard-backend  (auto-annotate-database-v0)  ·  tty ttys020  ·  age 5d
+    session 4cb31d70…
+    now: tool_use: Bash  ·  Run seed against demo_data DB
+
+  PID 62852  [waiting]  last activity 29s ago
+    auditboard-backend  (auto-annotate-database-v0)  ·  tty ttys023  ·  age 1m
+    session b86e60a9…
+    now: tool_use: Agent  ·  Find auto annotate trace UI link
+```
+
+**Status colors** — green `working` (last write < 10s ago), yellow `waiting`
+(stuck on a tool call > 10s), cyan `active` (< 2m), gray `idle`/`stale`/`unknown`.
 
 ## How it works
 

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import select
 import shutil
 import signal
 import sys
+import termios
 import time
+import tty
 from typing import Sequence
 
+from .agents import AgentDetail, list_agents
 from .sessions import Session, list_sessions
 from .stats_cache import StatsCacheSummary
 from .tokens import ActivityStats, Bucket, TokenAggregator, TokenSummary
@@ -153,23 +157,113 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
     return lines
 
 
-def render_frame(
+def _status_color(status: str) -> str:
+    return {
+        "working": f"{CSI}32m",   # green
+        "waiting": f"{CSI}33m",   # yellow
+        "active": f"{CSI}36m",    # cyan
+        "idle": f"{CSI}90m",      # bright black
+        "stale": f"{CSI}90m",
+        "unknown": f"{CSI}90m",
+    }.get(status, "")
+
+
+def _fmt_age(secs: int) -> str:
+    if secs < 0:
+        return "—"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def render_agents(agents: Sequence[AgentDetail], width: int) -> list[str]:
+    if not agents:
+        return [DIM + "  (no running claude sessions)" + RESET]
+    out: list[str] = []
+    for a in agents:
+        marker = "* " if a.is_current else "  "
+        color = _status_color(a.status)
+        head = (
+            f"{marker}{BOLD}PID {a.pid}{RESET}  "
+            f"{color}[{a.status}]{RESET}  "
+            f"last activity {_fmt_age(a.last_activity_secs)} ago"
+        )
+        out.append(head)
+        sub_indent = "    "
+        if a.name and a.name != "—":
+            out.append(f"{sub_indent}{BOLD}{a.name}{RESET}")
+        repo_branch = a.repo or "—"
+        if a.branch:
+            repo_branch += f"  ({a.branch})"
+        out.append(f"{sub_indent}{DIM}{repo_branch}  ·  tty {a.tty}  ·  age {a.age}{RESET}")
+        if a.session_id:
+            sid = a.session_id[:8] + "…" if len(a.session_id) > 9 else a.session_id
+            out.append(f"{sub_indent}{DIM}session {sid}{RESET}")
+        if a.last_event:
+            line = f"{sub_indent}now: {BOLD}{a.last_event}{RESET}"
+            if a.last_event_detail:
+                detail = a.last_event_detail
+                # Trim to fit
+                max_detail = max(20, width - len(sub_indent) - len("now: ") - len(a.last_event) - 5)
+                if len(detail) > max_detail:
+                    detail = detail[: max_detail - 1] + "…"
+                line += f"  {DIM}·{RESET}  {detail}"
+            out.append(line)
+        out.append("")
+    return out
+
+
+def render_overview(
     summary: TokenSummary,
     sessions: Sequence[Session],
     stats_cache: StatsCacheSummary,
     width: int,
-) -> str:
+) -> list[str]:
     blocks: list[str] = []
-    blocks.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
-    blocks.append("")
     blocks.extend(render_summary(summary, width))
     blocks.extend(render_activity(summary.activity, width))
     blocks.extend(render_stats_cache(stats_cache, width))
     blocks.append("")
     blocks.extend(render_table(sessions, width))
-    blocks.append("")
-    blocks.append(DIM + "  ctrl-C to exit" + RESET)
-    return "\n".join(blocks)
+    return blocks
+
+
+def render_tabs_header(active: int, names: list[str]) -> str:
+    parts = []
+    for i, name in enumerate(names, start=1):
+        if i == active:
+            parts.append(BOLD + f" {i} {name} " + RESET)
+        else:
+            parts.append(DIM + f" {i} {name} " + RESET)
+    return "  " + "│".join(parts)
+
+
+def render_frame(
+    *,
+    tab: str,
+    summary: TokenSummary,
+    sessions: Sequence[Session],
+    stats_cache: StatsCacheSummary,
+    agents: Sequence[AgentDetail],
+    width: int,
+) -> str:
+    tab_names = ["overview", "agents"]
+    active = 1 if tab == "overview" else 2
+    out: list[str] = []
+    out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
+    out.append(render_tabs_header(active, tab_names))
+    out.append("")
+    if tab == "agents":
+        out.extend(render_agents(agents, width))
+    else:
+        out.extend(render_overview(summary, sessions, stats_cache, width))
+    out.append("")
+    out.append(DIM + "  [1] overview  ·  [2] agents  ·  [r] refresh  ·  [q] quit" + RESET)
+    return "\n".join(out)
 
 
 def _terminal_size() -> tuple[int, int]:
@@ -180,7 +274,22 @@ def _terminal_size() -> tuple[int, int]:
         return 100, 30
 
 
-def live(interval: float, include_branch: bool = True) -> None:
+def _read_key(timeout: float) -> str | None:
+    """Wait up to `timeout` seconds for a single keystroke. Returns the char or None."""
+    try:
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+    except (OSError, ValueError):
+        return None
+    if not rlist:
+        return None
+    try:
+        ch = sys.stdin.read(1)
+    except OSError:
+        return None
+    return ch or None
+
+
+def live(interval: float, include_branch: bool = True, tab: str = "overview") -> None:
     """Run the live dashboard until the user exits."""
     from . import stats_cache as sc_mod  # noqa: PLC0415
 
@@ -192,6 +301,18 @@ def live(interval: float, include_branch: bool = True) -> None:
 
     signal.signal(signal.SIGWINCH, on_resize)
 
+    # Switch stdin to cbreak so we can read single keys without Enter, but only if it's a tty
+    fd = None
+    old_settings = None
+    if sys.stdin.isatty():
+        try:
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except (termios.error, OSError):
+            fd = None
+            old_settings = None
+
     sys.stdout.write(HIDE_CURSOR)
     sys.stdout.flush()
     try:
@@ -200,24 +321,55 @@ def live(interval: float, include_branch: bool = True) -> None:
             summary = aggregator.summarize()
             sessions = list_sessions(include_branch=include_branch)
             stats_cache = sc_mod.load()
-            frame = render_frame(summary, sessions, stats_cache, cols)
+            agents = list_agents() if tab == "agents" else []
+            frame = render_frame(
+                tab=tab,
+                summary=summary,
+                sessions=sessions,
+                stats_cache=stats_cache,
+                agents=agents,
+                width=cols,
+            )
             sys.stdout.write(HOME + CLEAR_TO_END + frame)
             sys.stdout.flush()
             needs_redraw["flag"] = False
-            # Sleep in small slices so SIGWINCH gets timely response
+            # Wait for either a keystroke or the refresh interval, whichever comes first
             slept = 0.0
-            slice_s = 0.1
+            slice_s = 0.2
             while slept < interval and not needs_redraw["flag"]:
-                time.sleep(slice_s)
-                slept += slice_s
+                key = _read_key(min(slice_s, interval - slept)) if fd is not None else None
+                if key:
+                    if key in ("q", "Q", "\x03"):  # ctrl-C falls through too
+                        raise KeyboardInterrupt
+                    if key == "1":
+                        tab = "overview"
+                        needs_redraw["flag"] = True
+                    elif key == "2":
+                        tab = "agents"
+                        needs_redraw["flag"] = True
+                    elif key in ("r", "R"):
+                        needs_redraw["flag"] = True
+                    elif key == "\t":
+                        tab = "agents" if tab == "overview" else "overview"
+                        needs_redraw["flag"] = True
+                else:
+                    slept += slice_s if fd is not None else interval  # no tty → just sleep full interval
+                    if fd is None:
+                        time.sleep(interval)
+                        break
     except KeyboardInterrupt:
         pass
     finally:
+        if fd is not None and old_settings is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except termios.error:
+                pass
         sys.stdout.write(SHOW_CURSOR + "\n")
         sys.stdout.flush()
 
 
-def once(include_branch: bool = True) -> None:
+def once(include_branch: bool = True, tab: str = "overview") -> None:
     from . import stats_cache as sc_mod  # noqa: PLC0415
 
     aggregator = TokenAggregator()
@@ -225,4 +377,14 @@ def once(include_branch: bool = True) -> None:
     summary = aggregator.summarize()
     sessions = list_sessions(include_branch=include_branch)
     stats_cache = sc_mod.load()
-    print(render_frame(summary, sessions, stats_cache, cols))
+    agents = list_agents() if tab == "agents" else []
+    print(
+        render_frame(
+            tab=tab,
+            summary=summary,
+            sessions=sessions,
+            stats_cache=stats_cache,
+            agents=agents,
+            width=cols,
+        )
+    )
