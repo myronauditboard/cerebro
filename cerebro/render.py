@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import select
 import shutil
 import signal
@@ -25,6 +27,17 @@ SHOW_CURSOR = f"{CSI}?25h"
 DIM = f"{CSI}2m"
 BOLD = f"{CSI}1m"
 RESET = f"{CSI}0m"
+# Mouse tracking — enable basic button events with SGR-format coordinates.
+MOUSE_ON = f"{CSI}?1000h{CSI}?1006h"
+MOUSE_OFF = f"{CSI}?1000l{CSI}?1006l"
+
+TABS = ["overview", "agents"]
+TAB_ROW = 2          # 1-indexed terminal row where the tab header lives
+TAB_PREFIX = "  "    # 2-char left margin before the first tab
+TAB_SEPARATOR = "  " # spaces between adjacent tabs
+
+# Capitalization for display (the lowercase form is the canonical id).
+TAB_DISPLAY = {"overview": "Overview", "agents": "Agents"}
 
 
 def fmt_count(n: int) -> str:
@@ -231,14 +244,38 @@ def render_overview(
     return blocks
 
 
-def render_tabs_header(active: int, names: list[str]) -> str:
-    parts = []
-    for i, name in enumerate(names, start=1):
-        if i == active:
-            parts.append(BOLD + f" {i} {name} " + RESET)
+def tab_layout(names: Sequence[str] = TABS) -> list[tuple[int, int, str]]:
+    """Return click hit-test ranges as (col_start, col_end, tab_id) — 1-indexed inclusive.
+
+    The tab header has a fixed deterministic layout (2-char prefix, " Name " per tab,
+    2-char separator), so we can compute click targets without measuring the rendered
+    output.
+    """
+    ranges: list[tuple[int, int, str]] = []
+    col = len(TAB_PREFIX) + 1  # 1-indexed
+    for i, name in enumerate(names):
+        display = TAB_DISPLAY.get(name, name.capitalize())
+        width = len(display) + 2  # one space padding on each side
+        ranges.append((col, col + width - 1, name))
+        col += width
+        if i < len(names) - 1:
+            col += len(TAB_SEPARATOR)
+    return ranges
+
+
+def render_tabs_header(active_id: str, names: Sequence[str] = TABS) -> str:
+    """Render the tab header in /usage's visual style — active tab gets a colored block."""
+    parts = [TAB_PREFIX]
+    for i, name in enumerate(names):
+        display = TAB_DISPLAY.get(name, name.capitalize())
+        if name == active_id:
+            # Active: violet background + white bold text
+            parts.append(f"{CSI}48;5;60m{CSI}1;97m {display} {RESET}")
         else:
-            parts.append(DIM + f" {i} {name} " + RESET)
-    return "  " + "│".join(parts)
+            parts.append(f"{DIM} {display} {RESET}")
+        if i < len(names) - 1:
+            parts.append(TAB_SEPARATOR)
+    return "".join(parts)
 
 
 def render_frame(
@@ -250,18 +287,20 @@ def render_frame(
     agents: Sequence[AgentDetail],
     width: int,
 ) -> str:
-    tab_names = ["overview", "agents"]
-    active = 1 if tab == "overview" else 2
     out: list[str] = []
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
-    out.append(render_tabs_header(active, tab_names))
+    out.append(render_tabs_header(tab))
     out.append("")
     if tab == "agents":
         out.extend(render_agents(agents, width))
     else:
         out.extend(render_overview(summary, sessions, stats_cache, width))
     out.append("")
-    out.append(DIM + "  [1] overview  ·  [2] agents  ·  [r] refresh  ·  [q] quit" + RESET)
+    out.append(
+        DIM
+        + "  click a tab or press [1]/[2]  ·  [r] refresh  ·  [q] quit"
+        + RESET
+    )
     return "\n".join(out)
 
 
@@ -273,8 +312,11 @@ def _terminal_size() -> tuple[int, int]:
         return 100, 30
 
 
-def _read_key(timeout: float) -> str | None:
-    """Wait up to `timeout` seconds for a single keystroke. Returns the char or None."""
+_SGR_MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+
+
+def _read_input(fd: int, timeout: float) -> bytes | None:
+    """Block up to `timeout` seconds. Return all available bytes, or None on timeout."""
     try:
         rlist, _, _ = select.select([sys.stdin], [], [], timeout)
     except (OSError, ValueError):
@@ -282,10 +324,33 @@ def _read_key(timeout: float) -> str | None:
     if not rlist:
         return None
     try:
-        ch = sys.stdin.read(1)
+        return os.read(fd, 1024)
     except OSError:
         return None
-    return ch or None
+
+
+def _parse_input(buf: bytes):
+    """Yield ('key', char) and ('mouse', button, col, row, press) events from a raw buffer."""
+    i = 0
+    n = len(buf)
+    while i < n:
+        if buf[i : i + 3] == b"\x1b[<":
+            m = _SGR_MOUSE_RE.match(buf, i)
+            if m:
+                button = int(m.group(1))
+                col = int(m.group(2))
+                row = int(m.group(3))
+                press = m.group(4) == b"M"
+                yield ("mouse", button, col, row, press)
+                i = m.end()
+                continue
+        # Any other byte is treated as a regular keystroke. Multi-byte ESC sequences
+        # we don't recognize will degrade gracefully (the leading ESC becomes a
+        # standalone "key" event the handler ignores).
+        ch = buf[i : i + 1].decode("utf-8", errors="ignore")
+        if ch:
+            yield ("key", ch)
+        i += 1
 
 
 def live(interval: float, include_branch: bool = True, tab: str = "overview") -> None:
@@ -300,7 +365,7 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
 
     signal.signal(signal.SIGWINCH, on_resize)
 
-    # Switch stdin to cbreak so we can read single keys without Enter, but only if it's a tty
+    # Switch stdin to cbreak and enable mouse tracking — but only if stdin is a tty.
     fd = None
     old_settings = None
     if sys.stdin.isatty():
@@ -312,7 +377,17 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
             fd = None
             old_settings = None
 
+    tab_ranges = tab_layout()
+
+    def _switch(new_tab: str) -> None:
+        nonlocal tab
+        if new_tab in TABS and new_tab != tab:
+            tab = new_tab
+            needs_redraw["flag"] = True
+
     sys.stdout.write(HIDE_CURSOR)
+    if fd is not None:
+        sys.stdout.write(MOUSE_ON)
     sys.stdout.flush()
     try:
         while True:
@@ -332,33 +407,42 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
             sys.stdout.write(HOME + CLEAR_TO_END + frame)
             sys.stdout.flush()
             needs_redraw["flag"] = False
-            # Wait for either a keystroke or the refresh interval, whichever comes first
+            # Wait for either input or the refresh interval, whichever comes first
             slept = 0.0
             slice_s = 0.2
             while slept < interval and not needs_redraw["flag"]:
-                key = _read_key(min(slice_s, interval - slept)) if fd is not None else None
-                if key:
-                    if key in ("q", "Q", "\x03"):  # ctrl-C falls through too
-                        raise KeyboardInterrupt
-                    if key == "1":
-                        tab = "overview"
-                        needs_redraw["flag"] = True
-                    elif key == "2":
-                        tab = "agents"
-                        needs_redraw["flag"] = True
-                    elif key in ("r", "R"):
-                        needs_redraw["flag"] = True
-                    elif key == "\t":
-                        tab = "agents" if tab == "overview" else "overview"
-                        needs_redraw["flag"] = True
-                else:
-                    slept += slice_s if fd is not None else interval  # no tty → just sleep full interval
-                    if fd is None:
-                        time.sleep(interval)
-                        break
+                if fd is None:
+                    time.sleep(interval - slept)
+                    break
+                buf = _read_input(fd, min(slice_s, interval - slept))
+                if not buf:
+                    slept += slice_s
+                    continue
+                for event in _parse_input(buf):
+                    if event[0] == "key":
+                        ch = event[1]
+                        if ch in ("q", "Q", "\x03"):
+                            raise KeyboardInterrupt
+                        if ch == "1":
+                            _switch("overview")
+                        elif ch == "2":
+                            _switch("agents")
+                        elif ch in ("r", "R"):
+                            needs_redraw["flag"] = True
+                        elif ch == "\t":
+                            _switch("agents" if tab == "overview" else "overview")
+                    elif event[0] == "mouse":
+                        _, button, col, row, press = event
+                        if press and button == 0 and row == TAB_ROW:
+                            for c_start, c_end, name in tab_ranges:
+                                if c_start <= col <= c_end:
+                                    _switch(name)
+                                    break
     except KeyboardInterrupt:
         pass
     finally:
+        if fd is not None:
+            sys.stdout.write(MOUSE_OFF)
         if fd is not None and old_settings is not None:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

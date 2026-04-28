@@ -91,7 +91,14 @@ cerebro --once --json | jq      # machine-readable
 cerebro help                    # usage
 ```
 
-**Live keys**:  `1` overview · `2` agents · `tab` cycle · `r` refresh · `q` quit
+**Live nav**: click a tab in the header (mouse), or press `1`/`2`/`tab` (keyboard).
+`r` forces a refresh, `q` quits.
+
+The tab header mirrors Claude Code's `/usage` style — the active tab gets a
+filled background block, inactive tabs are dim. Mouse click support uses SGR
+mouse mode (modes 1000+1006) which most modern terminals (iTerm2, recent
+macOS Terminal.app, Kitty, Alacritty, Ghostty) handle natively. If your
+terminal doesn't, keyboard nav still works.
 
 ## Agents tab
 
