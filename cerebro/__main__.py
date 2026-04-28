@@ -16,6 +16,7 @@ import json
 import sys
 
 from . import render
+from . import stats_cache as sc_mod
 from .sessions import list_sessions
 from .tokens import TokenAggregator
 
@@ -56,6 +57,7 @@ def _emit_json(include_sessions: bool, include_tokens: bool, include_branch: boo
     out: dict = {}
     if include_tokens:
         out["tokens"] = TokenAggregator().summarize().to_dict()
+        out["stats_cache"] = sc_mod.load().to_dict()
     if include_sessions:
         out["sessions"] = [s.to_dict() for s in list_sessions(include_branch=include_branch)]
     json.dump(out, sys.stdout, indent=2, default=str)
@@ -90,12 +92,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd == "tokens":
-        from .render import render_activity, render_summary, _terminal_size  # noqa: PLC0415
+        from .render import render_activity, render_stats_cache, render_summary, _terminal_size  # noqa: PLC0415
         cols, _ = _terminal_size()
         summary = TokenAggregator().summarize()
         for line in render_summary(summary, cols):
             print(line)
         for line in render_activity(summary.activity, cols):
+            print(line)
+        for line in render_stats_cache(sc_mod.load(), cols):
             print(line)
         return 0
 

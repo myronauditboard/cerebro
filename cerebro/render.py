@@ -9,6 +9,7 @@ import time
 from typing import Sequence
 
 from .sessions import Session, list_sessions
+from .stats_cache import StatsCacheSummary
 from .tokens import ActivityStats, Bucket, TokenAggregator, TokenSummary
 
 
@@ -74,6 +75,32 @@ def render_summary(summary: TokenSummary, width: int) -> list[str]:
     )
 
 
+def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
+    inner = max(60, width - 2)
+    if not sc.available:
+        return _panel(
+            "/usage parity",
+            ["  (~/.claude/stats-cache.json not found)"],
+            inner,
+        )
+    most_day = sc.most_active_day.strftime("%b %-d") if sc.most_active_day else "—"
+    first_d = sc.first_session_date.strftime("%b %-d, %Y") if sc.first_session_date else "—"
+    line1 = (
+        f"  Total tokens   {fmt_count(sc.total_tokens):>6}"
+        f"   ·   Total messages  {sc.total_messages:>5}"
+        f"   ·   Sessions  {sc.total_sessions}"
+    )
+    line2 = (
+        f"  Favorite model {sc.favorite_model}  ({fmt_count(sc.favorite_model_tokens)} tokens)"
+    )
+    line3 = (
+        f"  Most active    {most_day}  ({fmt_count(sc.most_active_day_tokens)} tokens)"
+        f"   ·   Streak  {sc.current_streak}d"
+        f"   ·   Since  {first_d}"
+    )
+    return _panel("/usage parity", [line1, line2, line3], inner)
+
+
 def render_activity(act: ActivityStats, width: int) -> list[str]:
     inner = max(60, width - 2)
     fav_label = act.favorite_model or "—"
@@ -124,12 +151,18 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
     return lines
 
 
-def render_frame(summary: TokenSummary, sessions: Sequence[Session], width: int) -> str:
+def render_frame(
+    summary: TokenSummary,
+    sessions: Sequence[Session],
+    stats_cache: StatsCacheSummary,
+    width: int,
+) -> str:
     blocks: list[str] = []
     blocks.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
     blocks.append("")
     blocks.extend(render_summary(summary, width))
     blocks.extend(render_activity(summary.activity, width))
+    blocks.extend(render_stats_cache(stats_cache, width))
     blocks.append("")
     blocks.extend(render_table(sessions, width))
     blocks.append("")
@@ -147,6 +180,8 @@ def _terminal_size() -> tuple[int, int]:
 
 def live(interval: float, include_branch: bool = True) -> None:
     """Run the live dashboard until the user exits."""
+    from . import stats_cache as sc_mod  # noqa: PLC0415
+
     aggregator = TokenAggregator()
     needs_redraw = {"flag": True}
 
@@ -162,7 +197,8 @@ def live(interval: float, include_branch: bool = True) -> None:
             cols, _ = _terminal_size()
             summary = aggregator.summarize()
             sessions = list_sessions(include_branch=include_branch)
-            frame = render_frame(summary, sessions, cols)
+            stats_cache = sc_mod.load()
+            frame = render_frame(summary, sessions, stats_cache, cols)
             sys.stdout.write(HOME + CLEAR_TO_END + frame)
             sys.stdout.flush()
             needs_redraw["flag"] = False
@@ -180,8 +216,11 @@ def live(interval: float, include_branch: bool = True) -> None:
 
 
 def once(include_branch: bool = True) -> None:
+    from . import stats_cache as sc_mod  # noqa: PLC0415
+
     aggregator = TokenAggregator()
     cols, _ = _terminal_size()
     summary = aggregator.summarize()
     sessions = list_sessions(include_branch=include_branch)
-    print(render_frame(summary, sessions, cols))
+    stats_cache = sc_mod.load()
+    print(render_frame(summary, sessions, stats_cache, cols))

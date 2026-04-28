@@ -18,6 +18,11 @@ cerebro — claude code activity
 │  Favorite model   claude-opus-4-7  (2.8M out tokens)                           │
 │  Most active day  Apr 24  (1.5M billable)   ·   Streak  1d                     │
 └────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────── /usage parity ─────────────────────────────────┐
+│  Total tokens     3.1M  ·  Total messages  9244  ·  Sessions  63               │
+│  Favorite model  claude-opus-4-7  (1.4M tokens)                                │
+│  Most active     Apr 16  (551.6K tokens)  ·  Streak  1d  ·  Since  Mar 26, 2026│
+└────────────────────────────────────────────────────────────────────────────────┘
 
    PID    AGE     REPO                 BRANCH                       TTY      SESSION
 *  21554  4d19h   auditboard-backend   auto-annotate-database-v0    ttys020  4cb31d70…
@@ -40,10 +45,21 @@ cerebro — claude code activity
 | `billable` | `raw + out` — same definition as `/usage`'s "Total tokens" |
 
 The `billable` column is the one to compare against the `/usage` Stats screen
-inside Claude Code. Cerebro and `/usage` may still differ by a few percent
-because `/usage` reads from a precomputed cache (`~/.claude/stats-cache.json`)
-that doesn't always re-derive completed days, whereas cerebro re-reads the
-jsonl files every refresh.
+inside Claude Code. They typically differ by a few percent because `/usage`
+reads from a precomputed cache (`~/.claude/stats-cache.json`) that doesn't
+always re-derive completed days, whereas cerebro's Tokens panel re-reads
+the jsonl files every refresh.
+
+### `/usage parity` panel
+
+This panel reads `~/.claude/stats-cache.json` directly — the same source
+`/usage` Stats reads from inside Claude Code — so its numbers match what
+you see in `/usage` exactly (e.g., "Total tokens: 3.1m").
+
+Use it to cross-check the live numbers in the Tokens panel above. Disagreement
+between the two means the stats cache is stale relative to the underlying
+jsonl files, not that either tool is wrong — just that they have different
+recompute cadences.
 
 ## Install
 
