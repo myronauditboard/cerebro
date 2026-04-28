@@ -156,7 +156,7 @@ def render_activity(summary: TokenSummary, width: int) -> list[str]:
     act = summary.activity
     today = summary.today
     fav_label = act.favorite_model or "—"
-    fav_n = fmt_count(act.favorite_model_output) if act.favorite_model_output else "0"
+    fav_n = fmt_count(act.favorite_model_billable) if act.favorite_model_billable else "0"
     most_day = act.most_active_day.strftime("%b %-d") if act.most_active_day else "—"
     most_n = fmt_count(act.most_active_day_billable) if act.most_active_day_billable else "0"
     streak = act.current_streak
@@ -177,7 +177,7 @@ def render_activity(summary: TokenSummary, width: int) -> list[str]:
         ),
         _table_row(
             "Favorite model",
-            f"{fav_n} out",
+            fav_n,
             "—",
             "—",
             fav_label,

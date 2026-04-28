@@ -26,7 +26,7 @@ class FileCache:
     mtime: float = 0.0
     offset: int = 0
     by_day: dict[date, DayTotals] = field(default_factory=dict)
-    by_model_output: dict[str, int] = field(default_factory=dict)
+    by_model_billable: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,7 +58,7 @@ class Bucket:
 @dataclass
 class ActivityStats:
     favorite_model: str
-    favorite_model_output: int
+    favorite_model_billable: int
     most_active_day: date | None
     most_active_day_billable: int
     current_streak: int
@@ -66,7 +66,7 @@ class ActivityStats:
     def to_dict(self) -> dict:
         return {
             "favorite_model": self.favorite_model,
-            "favorite_model_output": self.favorite_model_output,
+            "favorite_model_billable": self.favorite_model_billable,
             "most_active_day": self.most_active_day.isoformat() if self.most_active_day else None,
             "most_active_day_billable": self.most_active_day_billable,
             "current_streak": self.current_streak,
@@ -168,7 +168,9 @@ class TokenAggregator:
             day.cache_tokens += cache_in
             day.output_tokens += out
             day.msgs += 1
-            cache.by_model_output[model] = cache.by_model_output.get(model, 0) + out
+            cache.by_model_billable[model] = (
+                cache.by_model_billable.get(model, 0) + raw_in + out
+            )
 
         cache.mtime = st.st_mtime
 
@@ -204,7 +206,7 @@ class TokenAggregator:
         # Day-level rollup across all files for streak / most-active-day / per-day total
         days_total_billable: dict[date, int] = defaultdict(int)
         active_days: set[date] = set()
-        model_output: dict[str, int] = defaultdict(int)
+        model_billable: dict[str, int] = defaultdict(int)
 
         def add(b: Bucket, t: DayTotals) -> None:
             b.raw_input_tokens += t.raw_input_tokens
@@ -213,8 +215,8 @@ class TokenAggregator:
             b.msgs += t.msgs
 
         for path, fcache in self._cache.items():
-            for model, n in fcache.by_model_output.items():
-                model_output[model] += n
+            for model, n in fcache.by_model_billable.items():
+                model_billable[model] += n
             for day, totals in fcache.by_day.items():
                 add(lifetime, totals)
                 lifetime_files.add(path)
@@ -233,10 +235,10 @@ class TokenAggregator:
         lifetime.sessions = len(lifetime_files)
 
         # Activity-stats panel
-        if model_output:
-            fav_model, fav_out = max(model_output.items(), key=lambda kv: kv[1])
+        if model_billable:
+            fav_model, fav_billable = max(model_billable.items(), key=lambda kv: kv[1])
         else:
-            fav_model, fav_out = "—", 0
+            fav_model, fav_billable = "—", 0
         if days_total_billable:
             most_day, most_billable = max(days_total_billable.items(), key=lambda kv: kv[1])
         else:
@@ -250,7 +252,7 @@ class TokenAggregator:
 
         activity = ActivityStats(
             favorite_model=fav_model,
-            favorite_model_output=fav_out,
+            favorite_model_billable=fav_billable,
             most_active_day=most_day,
             most_active_day_billable=most_billable,
             current_streak=streak,
