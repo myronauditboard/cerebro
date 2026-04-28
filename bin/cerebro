@@ -1,0 +1,6 @@
+#!/bin/bash
+# cerebro — live CLI dashboard for Claude Code activity
+set -euo pipefail
+
+CEREBRO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec env PYTHONPATH="$CEREBRO_DIR:${PYTHONPATH:-}" python3 -m cerebro "$@"
