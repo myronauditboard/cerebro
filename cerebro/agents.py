@@ -29,28 +29,53 @@ SUB_AGENT_RECENT_LIMIT = 10
 
 
 @dataclass
+class Interaction:
+    """One prompt/response pair from a session's jsonl."""
+    user_text: str          # the user's prompt text (untruncated)
+    user_ts: str            # ISO timestamp of the user message (or "")
+    assistant_text: str     # final assistant text in this turn (or "" if still running)
+    assistant_ts: str
+    tool_calls: int         # number of tool_use blocks issued in this turn
+    in_progress: bool       # True if no final assistant text yet
+
+    def to_dict(self) -> dict:
+        return {
+            "user_text": self.user_text,
+            "user_ts": self.user_ts,
+            "assistant_text": self.assistant_text,
+            "assistant_ts": self.assistant_ts,
+            "tool_calls": self.tool_calls,
+            "in_progress": self.in_progress,
+        }
+
+
+@dataclass
 class SubAgentDetail:
     agent_id: str                    # from filename: agent-<id>.jsonl
     agent_type: str                  # from meta.json["agentType"]
     description: str                 # from meta.json["description"]
+    prompt: str                      # full prompt the parent sent (untruncated)
     prompt_excerpt: str              # first user record's prompt, ≤ 200 chars
     last_activity_secs: int          # seconds since last jsonl write; -1 if unknown
     last_event: str
     last_event_detail: str
     status: str
     is_active: bool                  # mtime within SUB_AGENT_ACTIVE_SECS
+    recent_interactions: list[Interaction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "agent_id": self.agent_id,
             "agent_type": self.agent_type,
             "description": self.description,
+            "prompt": self.prompt,
             "prompt_excerpt": self.prompt_excerpt,
             "last_activity_secs": self.last_activity_secs,
             "last_event": self.last_event,
             "last_event_detail": self.last_event_detail,
             "status": self.status,
             "is_active": self.is_active,
+            "recent_interactions": [i.to_dict() for i in self.recent_interactions],
         }
 
 
@@ -74,6 +99,7 @@ class AgentDetail:
     last_event_detail: str           # short excerpt (≤ 120 chars)
     status: str                      # "working" / "waiting" / "idle" / "unknown"
     sub_agents: list[SubAgentDetail] = field(default_factory=list)
+    recent_interactions: list[Interaction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +119,7 @@ class AgentDetail:
             "last_event_detail": self.last_event_detail,
             "status": self.status,
             "sub_agents": [sa.to_dict() for sa in self.sub_agents],
+            "recent_interactions": [i.to_dict() for i in self.recent_interactions],
         }
 
 
@@ -179,7 +206,7 @@ def _read_first_record(path: Path, hard_cap_bytes: int = 256_000) -> dict | None
         return None
 
 
-def _tail_lines(path: Path, max_bytes: int = 16_000) -> list[dict]:
+def _tail_lines(path: Path, max_bytes: int = 256_000) -> list[dict]:
     """Read the tail of a jsonl file and return decoded records (best-effort)."""
     try:
         size = path.stat().st_size
@@ -248,6 +275,115 @@ def _summarize_event(d: dict) -> tuple[str, str]:
             return ("user_msg", content[:120].replace("\n", " "))
         return ("user_msg", "")
     return (role or "", "")
+
+
+def _user_text_content(rec: dict) -> str:
+    """Return the human-prompt text from a user record, or '' if it's a tool_result-only
+    record or an internal stub like a slash-command invocation."""
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        s = content.strip()
+        if s.startswith("<command-name>") or s.startswith("[Request interrupted"):
+            return ""
+        return s
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                t = c.get("text") or ""
+                if t.strip().startswith("<command-name>"):
+                    continue
+                pieces.append(t)
+        return "\n".join(pieces).strip()
+    return ""
+
+
+def _assistant_text_content(rec: dict) -> str:
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        pieces = [
+            c.get("text") or ""
+            for c in content
+            if isinstance(c, dict) and c.get("type") == "text"
+        ]
+        return "\n".join(pieces).strip()
+    return ""
+
+
+def _count_tool_uses(rec: dict) -> int:
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        return sum(
+            1 for c in content if isinstance(c, dict) and c.get("type") == "tool_use"
+        )
+    return 0
+
+
+def _recent_interactions(
+    convo: list[dict], limit: int = 10, seed_prompt: str | None = None
+) -> list[Interaction]:
+    """Walk conversational records and pair them into prompt/response interactions.
+
+    A new interaction starts whenever a user record has actual text content
+    (not a tool_result-only record). Subsequent assistant records contribute
+    their tool_use count and final text to the in-progress interaction.
+    Returns the most recent `limit` interactions in chronological order.
+
+    If `seed_prompt` is given (sub-agent mode), produces exactly one interaction
+    pairing that prompt with the assistant activity in `convo`.
+    """
+    if seed_prompt is not None:
+        tool_count = 0
+        asst = ""
+        asst_ts = ""
+        for rec in convo:
+            if rec.get("type") == "assistant":
+                tool_count += _count_tool_uses(rec)
+                t = _assistant_text_content(rec)
+                if t:
+                    asst = t
+                    asst_ts = rec.get("timestamp", "")
+        return [
+            Interaction(
+                user_text=seed_prompt,
+                user_ts="",
+                assistant_text=asst,
+                assistant_ts=asst_ts,
+                tool_calls=tool_count,
+                in_progress=(asst == ""),
+            )
+        ]
+
+    interactions: list[Interaction] = []
+    current: Interaction | None = None
+    for rec in convo:
+        rtype = rec.get("type")
+        if rtype == "user":
+            user_text = _user_text_content(rec)
+            if user_text:
+                if current is not None:
+                    interactions.append(current)
+                current = Interaction(
+                    user_text=user_text,
+                    user_ts=rec.get("timestamp", ""),
+                    assistant_text="",
+                    assistant_ts="",
+                    tool_calls=0,
+                    in_progress=True,
+                )
+        elif rtype == "assistant" and current is not None:
+            current.tool_calls += _count_tool_uses(rec)
+            asst = _assistant_text_content(rec)
+            if asst:
+                current.assistant_text = asst
+                current.assistant_ts = rec.get("timestamp", "")
+                current.in_progress = False
+    if current is not None:
+        interactions.append(current)
+    return interactions[-limit:]
 
 
 def _derive_status(records: list[dict], age_secs: int) -> str:
@@ -338,9 +474,11 @@ def _list_sub_agents(parent_jsonl: Path, now: float) -> list[SubAgentDetail]:
                 pass
 
         first = _read_first_record(path)
+        prompt_full = ""
         prompt_excerpt = ""
         if first is not None:
             text = _extract_prompt_text(first)
+            prompt_full = text
             prompt_excerpt = text.replace("\n", " ").strip()[:200]
 
         records = _tail_lines(path)
@@ -358,12 +496,14 @@ def _list_sub_agents(parent_jsonl: Path, now: float) -> list[SubAgentDetail]:
                 agent_id=agent_id,
                 agent_type=agent_type,
                 description=description,
+                prompt=prompt_full,
                 prompt_excerpt=prompt_excerpt,
                 last_activity_secs=last_age,
                 last_event=last_event,
                 last_event_detail=last_detail,
                 status=status,
                 is_active=is_active,
+                recent_interactions=_recent_interactions(convo, seed_prompt=prompt_full),
             )
         )
     return out
@@ -384,6 +524,7 @@ def list_agents() -> list[AgentDetail]:
         last_detail = ""
         last_age = -1
         sub_agents: list[SubAgentDetail] = []
+        recent: list[Interaction] = []
         if jsonl:
             try:
                 last_age = int(now - jsonl.stat().st_mtime)
@@ -397,6 +538,7 @@ def list_agents() -> list[AgentDetail]:
                 last_event, last_detail = _summarize_event(convo[-1])
             status = _derive_status(convo, last_age)
             sub_agents = _list_sub_agents(jsonl, now)
+            recent = _recent_interactions(convo)
         else:
             status = "unknown"
             records = []
@@ -418,6 +560,7 @@ def list_agents() -> list[AgentDetail]:
                 last_event_detail=last_detail,
                 status=status,
                 sub_agents=sub_agents,
+                recent_interactions=recent,
             )
         )
     out.sort(key=lambda a: (not a.is_current, -1 if a.last_activity_secs < 0 else a.last_activity_secs, a.pid))

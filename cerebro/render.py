@@ -13,7 +13,7 @@ import time
 import tty
 from typing import Sequence
 
-from .agents import AgentDetail, SubAgentDetail, list_agents
+from .agents import AgentDetail, Interaction, SubAgentDetail, list_agents
 from .sessions import Session, list_sessions
 from .stats_cache import StatsCacheSummary
 from .tokens import ActivityStats, Bucket, TokenAggregator, TokenSummary
@@ -372,6 +372,256 @@ def render_tabs_header(active_id: str, names: Sequence[str] = TABS) -> str:
     return "".join(parts)
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible_len(s: str) -> int:
+    """Length of `s` ignoring ANSI escape sequences."""
+    return len(_ANSI_RE.sub("", s))
+
+
+def _pad_visible(s: str, width: int) -> str:
+    """Right-pad `s` so its visible length is `width` (no truncation)."""
+    diff = width - _visible_len(s)
+    if diff > 0:
+        return s + " " * diff
+    return s
+
+
+# Layout for the per-agent sub-tab row.
+SUBTAB_PREFIX = "  "
+SUBTAB_SEPARATOR = "  "
+SUBTAB_LABEL_MAX = 20      # max chars of session name before truncation
+SUBTAB_LABEL_FALLBACK = "PID {pid}"
+SUBTAB_ROW = 4             # 1-indexed terminal row where the sub-tab header lives
+SPLIT_MIN_WIDTH = 70       # below this, fall back to the flat list renderer
+SPLIT_NAV_WIDTH = 32       # left pane width
+SPLIT_GAP = " │ "          # column separator between nav and detail
+
+
+def _agent_label(a: AgentDetail) -> str:
+    if a.name and a.name != "—":
+        label = a.name
+    else:
+        label = SUBTAB_LABEL_FALLBACK.format(pid=a.pid)
+    if len(label) > SUBTAB_LABEL_MAX:
+        label = label[: SUBTAB_LABEL_MAX - 1] + "…"
+    return label
+
+
+def render_agent_subtabs(
+    agents: Sequence[AgentDetail], active_pid: int | None, width: int
+) -> tuple[str, list[tuple[int, int, int]]]:
+    """Render the per-agent sub-tab row and return (rendered_string, click_ranges).
+
+    Each click_range is (col_start, col_end, pid), 1-indexed inclusive.
+    """
+    if not agents:
+        return (DIM + "  (no running claude sessions)" + RESET, [])
+    parts: list[str] = [SUBTAB_PREFIX]
+    ranges: list[tuple[int, int, int]] = []
+    col = len(SUBTAB_PREFIX) + 1  # 1-indexed
+    for i, a in enumerate(agents):
+        label = _agent_label(a)
+        chip_w = len(label) + 2  # one space on each side
+        if a.pid == active_pid:
+            parts.append(f"{CSI}48;5;60m{CSI}1;97m {label} {RESET}")
+        else:
+            parts.append(f"{DIM} {label} {RESET}")
+        ranges.append((col, col + chip_w - 1, a.pid))
+        col += chip_w
+        if i < len(agents) - 1:
+            parts.append(SUBTAB_SEPARATOR)
+            col += len(SUBTAB_SEPARATOR)
+    return ("".join(parts), ranges)
+
+
+def _short_ts(iso: str) -> str:
+    """Compact "HH:MM" from an ISO timestamp; empty string if unparseable."""
+    if not iso or len(iso) < 16 or iso[10:11] != "T":
+        return ""
+    return iso[11:16]
+
+
+def _format_interactions(
+    interactions: Sequence[Interaction],
+    width: int,
+    user_label: str = "You",
+) -> list[str]:
+    out: list[str] = []
+    if not interactions:
+        out.append(f"{DIM}(no recent interactions captured){RESET}")
+        return out
+    body_w = max(20, width - 2)
+    # Newest first.
+    ordered = list(reversed(interactions))
+    for i, intr in enumerate(ordered):
+        if i > 0:
+            out.append("")
+        ts_u = _short_ts(intr.user_ts)
+        u_meta = f" {DIM}· {ts_u}{RESET}" if ts_u else ""
+        out.append(f"{BOLD}{user_label}{RESET}{u_meta}")
+        for line in _wrap_plain(intr.user_text, body_w)[:3]:
+            out.append("  " + line)
+        ts_a = _short_ts(intr.assistant_ts)
+        tools_str = (
+            f"{intr.tool_calls} tool{'s' if intr.tool_calls != 1 else ''}"
+            if intr.tool_calls else ""
+        )
+        if intr.in_progress:
+            head_extra = f"{DIM}· in progress"
+            if tools_str:
+                head_extra += f" · {tools_str}"
+            head_extra += RESET
+        else:
+            parts = []
+            if ts_a:
+                parts.append(ts_a)
+            if tools_str:
+                parts.append(tools_str)
+            head_extra = f"{DIM}· {' · '.join(parts)}{RESET}" if parts else ""
+        out.append(f"{BOLD}AI{RESET} {head_extra}")
+        body = intr.assistant_text or ("…" if intr.in_progress else "")
+        if body:
+            for line in _wrap_plain(body, body_w)[:4]:
+                out.append("  " + line)
+    return out
+
+
+def _wrap_plain(text: str, width: int) -> list[str]:
+    """Cheap line wrap for prompt body. No ANSI to worry about (text is plain)."""
+    out: list[str] = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            out.append("")
+            continue
+        line = paragraph
+        while len(line) > width:
+            cut = line.rfind(" ", 0, width)
+            if cut <= 0:
+                cut = width
+            out.append(line[:cut])
+            line = line[cut:].lstrip()
+        out.append(line)
+    return out
+
+
+def _render_agent_nav(
+    agent: AgentDetail, nav_index: int, width: int
+) -> list[str]:
+    """Render the left-pane nav: agent first, then sub-agents."""
+    out: list[str] = []
+    items: list[tuple[str, str]] = []  # (label, status)
+    items.append(("⌂ " + _agent_label(agent), agent.status))
+    for sa in agent.sub_agents:
+        desc = sa.description or sa.agent_id
+        label = f"{sa.agent_type}  {desc}"
+        items.append((label, sa.status))
+    for i, (label, status) in enumerate(items):
+        cursor = "▸ " if i == nav_index else "  "
+        color = _status_color(status)
+        budget = max(8, width - len(cursor) - 2)
+        trimmed = _trim(label, budget)
+        line = f"{cursor}{color}●{RESET} {trimmed}"
+        if i == nav_index:
+            line = f"{BOLD}{cursor}{RESET}{color}●{RESET} {BOLD}{trimmed}{RESET}"
+        out.append(line)
+    return out
+
+
+def _render_prompt_section(prompt: str, source: str, width: int) -> list[str]:
+    out: list[str] = [f"{BOLD}Prompt{RESET} {DIM}(from {source}){RESET}"]
+    if prompt:
+        for line in _wrap_plain(prompt, width):
+            out.append(f"{DIM}{line}{RESET}")
+    else:
+        out.append(f"{DIM}(no prompt captured){RESET}")
+    return out
+
+
+def _render_agent_detail(
+    agent: AgentDetail, nav_index: int, width: int
+) -> list[str]:
+    """Render the right-pane detail for whichever nav item is selected."""
+    out: list[str] = []
+    if nav_index == 0:
+        # The parent agent itself
+        color = _status_color(agent.status)
+        marker = "* " if agent.is_current else ""
+        out.append(
+            f"{marker}{BOLD}PID {agent.pid}{RESET}  "
+            f"{color}[{agent.status}]{RESET}  "
+            f"last activity {_fmt_age(agent.last_activity_secs)} ago"
+        )
+        if agent.name and agent.name != "—":
+            out.append(f"{BOLD}{agent.name}{RESET}")
+        repo_branch = agent.repo or "—"
+        if agent.branch:
+            repo_branch += f"  ({agent.branch})"
+        out.append(f"{DIM}{repo_branch}  ·  tty {agent.tty}  ·  age {agent.age}{RESET}")
+        if agent.session_id:
+            sid = agent.session_id[:8] + "…" if len(agent.session_id) > 9 else agent.session_id
+            out.append(f"{DIM}session {sid}{RESET}")
+        if agent.last_event:
+            line = f"now: {BOLD}{agent.last_event}{RESET}"
+            if agent.last_event_detail:
+                budget = max(20, width - _visible_len(line) - 5)
+                line += f"  {DIM}·{RESET}  {_trim(agent.last_event_detail, budget)}"
+            out.append(line)
+        # Most recent user prompt for the parent agent
+        latest_prompt = agent.recent_interactions[-1].user_text if agent.recent_interactions else ""
+        out.append("")
+        out.extend(_render_prompt_section(latest_prompt, "you", width))
+        out.append("")
+        out.append(f"{BOLD}Recent interactions{RESET}")
+        out.extend(_format_interactions(agent.recent_interactions, width, user_label="You"))
+        return out
+
+    sa_idx = nav_index - 1
+    if sa_idx < 0 or sa_idx >= len(agent.sub_agents):
+        out.append(f"{DIM}(invalid selection){RESET}")
+        return out
+    sa = agent.sub_agents[sa_idx]
+    color = _status_color(sa.status)
+    out.append(
+        f"{BOLD}Agent[{sa.agent_type}]{RESET}  "
+        f"{color}[{sa.status}]{RESET}  "
+        f"{DIM}last activity {_fmt_age(sa.last_activity_secs)} ago{RESET}"
+    )
+    if sa.description:
+        out.append(f"{DIM}{_trim(sa.description, max(20, width - 2))}{RESET}")
+    if sa.last_event:
+        line = f"now: {BOLD}{sa.last_event}{RESET}"
+        if sa.last_event_detail:
+            budget = max(20, width - _visible_len(line) - 5)
+            line += f"  {DIM}·{RESET}  {_trim(sa.last_event_detail, budget)}"
+        out.append(line)
+    out.append("")
+    out.extend(_render_prompt_section(sa.prompt, "parent agent", width))
+    out.append("")
+    out.append(f"{BOLD}Recent interactions{RESET}")
+    out.extend(_format_interactions(sa.recent_interactions, width, user_label="Parent"))
+    return out
+
+
+def render_agent_split(
+    agent: AgentDetail, nav_index: int, width: int
+) -> list[str]:
+    """Stitch left nav and right detail into a single list of lines."""
+    nav_w = SPLIT_NAV_WIDTH
+    gap_w = len(SPLIT_GAP)
+    detail_w = max(20, width - nav_w - gap_w)
+    nav = _render_agent_nav(agent, nav_index, nav_w)
+    detail = _render_agent_detail(agent, nav_index, detail_w)
+    height = max(len(nav), len(detail))
+    out: list[str] = []
+    for i in range(height):
+        left = nav[i] if i < len(nav) else ""
+        right = detail[i] if i < len(detail) else ""
+        out.append(_pad_visible(left, nav_w) + f"{DIM}{SPLIT_GAP}{RESET}" + right)
+    return out
+
+
 def render_frame(
     *,
     tab: str,
@@ -379,23 +629,60 @@ def render_frame(
     sessions: Sequence[Session],
     stats_cache: StatsCacheSummary,
     agents: Sequence[AgentDetail],
+    active_pid: int | None,
+    nav_index: int,
     width: int,
-) -> str:
+    mouse_enabled: bool = True,
+) -> tuple[str, int, list[tuple[int, int, int]]]:
+    """Render a complete frame.
+
+    Returns (frame_text, sticky_top_lines, subtab_click_ranges). The sub-tab row is
+    sticky so it stays visible while the body scrolls; the live loop uses
+    sticky_top_lines and the click ranges to keep mouse hit-testing correct.
+    """
     out: list[str] = []
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
     out.append(render_tabs_header(tab))
     out.append("")
+    subtab_ranges: list[tuple[int, int, int]] = []
+    sticky_top = _STICKY_TOP
     if tab == "agents":
-        out.extend(render_agents(agents, width))
+        subtab_line, subtab_ranges = render_agent_subtabs(agents, active_pid, width)
+        out.append(subtab_line)
+        out.append("")
+        sticky_top = _STICKY_TOP + 2
+        # Body
+        active = next((a for a in agents if a.pid == active_pid), None)
+        if not agents:
+            pass  # subtab_line already says "(no running claude sessions)"
+        elif width < SPLIT_MIN_WIDTH or active is None:
+            out.extend(render_agents(agents, width))
+        else:
+            out.extend(render_agent_split(active, nav_index, width))
     else:
         out.extend(render_overview(summary, sessions, stats_cache, width))
     out.append("")
-    out.append(
-        DIM
-        + "  click a tab or [1]/[2]  ·  ↑↓ / wheel scroll  ·  [r] refresh  ·  [q] quit"
-        + RESET
-    )
-    return "\n".join(out)
+    if not mouse_enabled:
+        # Selection mode: refresh paused, mouse tracking off so the terminal can
+        # do native click-drag selection. Make the state obvious in the footer.
+        out.append(
+            f"  {CSI}33m⚠ select mode{RESET}{DIM}"
+            f"  ·  refresh paused, drag to select / copy normally  ·  "
+            f"[s] resume  ·  [q] quit{RESET}"
+        )
+    else:
+        if tab == "agents":
+            footer = (
+                "  click a tab/agent or [1]/[2] · h/l agent · j/k nav · "
+                "[s] select · [r] refresh · [q] quit"
+            )
+        else:
+            footer = (
+                "  click a tab or [1]/[2]  ·  ↑↓ / wheel scroll  ·  "
+                "[s] select  ·  [r] refresh  ·  [q] quit"
+            )
+        out.append(DIM + footer + RESET)
+    return ("\n".join(out), sticky_top, subtab_ranges)
 
 
 def _terminal_size() -> tuple[int, int]:
@@ -468,17 +755,20 @@ _STICKY_TOP = 3
 _STICKY_BOTTOM = 2
 
 
-def _apply_scroll(frame: str, term_rows: int, offset: int) -> tuple[str, int, int]:
-    """Slice the rendered frame so it fits in `term_rows`, keeping the top 3 lines and
-    bottom 2 lines sticky. Returns (rendered_string, clamped_offset, max_offset).
+def _apply_scroll(
+    frame: str, term_rows: int, offset: int, sticky_top: int = _STICKY_TOP
+) -> tuple[str, int, int]:
+    """Slice the rendered frame so it fits in `term_rows`, keeping the top
+    `sticky_top` lines and bottom 2 lines sticky. Returns
+    (rendered_string, clamped_offset, max_offset).
     """
     lines = frame.split("\n")
     if term_rows <= 0 or len(lines) <= term_rows:
         return frame, 0, 0
 
-    top = lines[:_STICKY_TOP]
+    top = lines[:sticky_top]
     bottom = lines[-_STICKY_BOTTOM:]
-    body = lines[_STICKY_TOP:-_STICKY_BOTTOM]
+    body = lines[sticky_top:-_STICKY_BOTTOM]
 
     avail = term_rows - len(top) - len(bottom)
     if avail <= 0:
@@ -531,7 +821,18 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
     tab_ranges = tab_layout()
     # Per-tab scroll offset so switching back to a tab restores its position.
     scroll_offsets: dict[str, int] = {name: 0 for name in TABS}
+    # Agents-tab state: which agent is the active sub-tab, and which nav item is
+    # selected within that agent (0 = the agent itself, 1+ = its sub-agents).
+    active_agent_pid: int | None = None
+    nav_indices: dict[int, int] = {}        # pid → nav_index
+    subtab_ranges: list[tuple[int, int, int]] = []
     last_term_rows = {"v": 24}
+    # Selection mode: when False, mouse tracking is off and refresh is paused so
+    # the terminal's native click-drag selection works for copy/paste.
+    mouse_state = {"on": True}
+    # Hoisted across iterations so the input-handler closures retain a valid
+    # reference while the refresh is paused in select mode.
+    agents: list[AgentDetail] = []
 
     def _switch(new_tab: str) -> None:
         nonlocal tab
@@ -548,6 +849,13 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
         scroll_offsets[tab] = pos if pos is not None else 1_000_000
         needs_redraw["flag"] = True
 
+    def _toggle_select_mode() -> None:
+        mouse_state["on"] = not mouse_state["on"]
+        if fd is not None:
+            sys.stdout.write(MOUSE_ON if mouse_state["on"] else MOUSE_OFF)
+            sys.stdout.flush()
+        needs_redraw["flag"] = True
+
     sys.stdout.write(HIDE_CURSOR)
     if fd is not None:
         sys.stdout.write(MOUSE_ON)
@@ -556,23 +864,72 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
         while True:
             cols, term_rows = _terminal_size()
             last_term_rows["v"] = term_rows
-            summary = aggregator.summarize()
-            sessions = list_sessions(include_branch=include_branch)
-            stats_cache = sc_mod.load()
-            agents = list_agents() if tab == "agents" else []
-            frame = render_frame(
-                tab=tab,
-                summary=summary,
-                sessions=sessions,
-                stats_cache=stats_cache,
-                agents=agents,
-                width=cols,
-            )
-            view, clamped, _max_offset = _apply_scroll(frame, term_rows, scroll_offsets[tab])
-            scroll_offsets[tab] = clamped
-            sys.stdout.write(HOME + CLEAR_TO_END + view)
-            sys.stdout.flush()
+            # In selection mode we freeze data + display so the terminal's native
+            # selection isn't clobbered. Only re-render on explicit toggle/redraw.
+            if mouse_state["on"] or needs_redraw["flag"]:
+                summary = aggregator.summarize()
+                sessions = list_sessions(include_branch=include_branch)
+                stats_cache = sc_mod.load()
+                agents = list_agents() if tab == "agents" else []
+
+                # Reconcile active_agent_pid with the current agents list.
+                if tab == "agents":
+                    pids = [a.pid for a in agents]
+                    if active_agent_pid not in pids:
+                        active_agent_pid = pids[0] if pids else None
+                    # Clamp this agent's nav_index against its current sub-agent count.
+                    if active_agent_pid is not None:
+                        active = next(a for a in agents if a.pid == active_agent_pid)
+                        max_idx = len(active.sub_agents)  # 0..len inclusive
+                        cur = nav_indices.get(active_agent_pid, 0)
+                        nav_indices[active_agent_pid] = max(0, min(cur, max_idx))
+
+                nav_index = nav_indices.get(active_agent_pid, 0) if active_agent_pid is not None else 0
+                frame, sticky_top, subtab_ranges = render_frame(
+                    tab=tab,
+                    summary=summary,
+                    sessions=sessions,
+                    stats_cache=stats_cache,
+                    agents=agents,
+                    active_pid=active_agent_pid,
+                    nav_index=nav_index,
+                    width=cols,
+                    mouse_enabled=mouse_state["on"],
+                )
+                view, clamped, _max_offset = _apply_scroll(
+                    frame, term_rows, scroll_offsets[tab], sticky_top=sticky_top
+                )
+                scroll_offsets[tab] = clamped
+                sys.stdout.write(HOME + CLEAR_TO_END + view)
+                sys.stdout.flush()
             needs_redraw["flag"] = False
+
+            def _cycle_subtab(delta: int) -> None:
+                nonlocal active_agent_pid
+                if not agents:
+                    return
+                pids = [a.pid for a in agents]
+                if active_agent_pid in pids:
+                    i = pids.index(active_agent_pid)
+                else:
+                    i = 0
+                active_agent_pid = pids[(i + delta) % len(pids)]
+                # New tab → reset detail scroll
+                scroll_offsets[tab] = 0
+                needs_redraw["flag"] = True
+
+            def _move_nav(delta: int) -> None:
+                if active_agent_pid is None:
+                    return
+                active = next((a for a in agents if a.pid == active_agent_pid), None)
+                if active is None:
+                    return
+                max_idx = len(active.sub_agents)  # 0..len inclusive
+                cur = nav_indices.get(active_agent_pid, 0)
+                nav_indices[active_agent_pid] = max(0, min(cur + delta, max_idx))
+                scroll_offsets[tab] = 0
+                needs_redraw["flag"] = True
+
             # Wait for either input or the refresh interval, whichever comes first
             slept = 0.0
             slice_s = 0.2
@@ -585,12 +942,22 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                     slept += slice_s
                     continue
                 page = max(1, last_term_rows["v"] // 2)
+                on_agents = tab == "agents"
+                in_select = not mouse_state["on"]
                 for event in _parse_input(buf):
                     kind = event[0]
                     if kind == "key":
                         ch = event[1]
                         if ch in ("q", "Q", "\x03"):
                             raise KeyboardInterrupt
+                        if ch in ("s", "S"):
+                            _toggle_select_mode()
+                            continue
+                        # In select mode, swallow everything else to preserve the
+                        # terminal's text selection. Only `s` (resume) and `q`
+                        # (quit) above are honored.
+                        if in_select:
+                            continue
                         if ch == "1":
                             _switch("overview")
                         elif ch == "2":
@@ -599,9 +966,17 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                             needs_redraw["flag"] = True
                         elif ch == "\t":
                             _switch("agents" if tab == "overview" else "overview")
-                        elif ch == "j":
+                        elif on_agents and ch == "h":
+                            _cycle_subtab(-1)
+                        elif on_agents and ch == "l":
+                            _cycle_subtab(1)
+                        elif on_agents and ch == "j":
+                            _move_nav(1)
+                        elif on_agents and ch == "k":
+                            _move_nav(-1)
+                        elif not on_agents and ch == "j":
                             _scroll(1)
-                        elif ch == "k":
+                        elif not on_agents and ch == "k":
                             _scroll(-1)
                         elif ch == "g":
                             _scroll_to(0)
@@ -612,11 +987,25 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                         elif ch == "\x15":      # ctrl-U
                             _scroll(-page)
                     elif kind == "csi":
+                        if in_select:
+                            continue
                         seq = event[1]
-                        if seq == "A":
-                            _scroll(-1)
-                        elif seq == "B":
-                            _scroll(1)
+                        if seq == "A":      # up
+                            if on_agents:
+                                _move_nav(-1)
+                            else:
+                                _scroll(-1)
+                        elif seq == "B":    # down
+                            if on_agents:
+                                _move_nav(1)
+                            else:
+                                _scroll(1)
+                        elif seq == "D":    # left
+                            if on_agents:
+                                _cycle_subtab(-1)
+                        elif seq == "C":    # right
+                            if on_agents:
+                                _cycle_subtab(1)
                         elif seq == "5~":
                             _scroll(-page)
                         elif seq == "6~":
@@ -626,6 +1015,8 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                         elif seq == "F":
                             _scroll_to(None)
                     elif kind == "mouse":
+                        if in_select:
+                            continue
                         _, button, col, row, press = event
                         if not press:
                             continue
@@ -633,6 +1024,14 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                             for c_start, c_end, name in tab_ranges:
                                 if c_start <= col <= c_end:
                                     _switch(name)
+                                    break
+                        elif button == 0 and on_agents and row == SUBTAB_ROW:
+                            for c_start, c_end, pid in subtab_ranges:
+                                if c_start <= col <= c_end:
+                                    if pid != active_agent_pid:
+                                        active_agent_pid = pid
+                                        scroll_offsets[tab] = 0
+                                        needs_redraw["flag"] = True
                                     break
                         elif button == 64:    # wheel up
                             _scroll(-3)
@@ -661,13 +1060,15 @@ def once(include_branch: bool = True, tab: str = "overview") -> None:
     sessions = list_sessions(include_branch=include_branch)
     stats_cache = sc_mod.load()
     agents = list_agents() if tab == "agents" else []
-    print(
-        render_frame(
-            tab=tab,
-            summary=summary,
-            sessions=sessions,
-            stats_cache=stats_cache,
-            agents=agents,
-            width=cols,
-        )
+    active_pid = agents[0].pid if agents else None
+    frame, _sticky, _ranges = render_frame(
+        tab=tab,
+        summary=summary,
+        sessions=sessions,
+        stats_cache=stats_cache,
+        agents=agents,
+        active_pid=active_pid,
+        nav_index=0,
+        width=cols,
     )
+    print(frame)
