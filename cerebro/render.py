@@ -13,7 +13,7 @@ import time
 import tty
 from typing import Sequence
 
-from .agents import AgentDetail, list_agents
+from .agents import AgentDetail, SubAgentDetail, list_agents
 from .sessions import Session, list_sessions
 from .stats_cache import StatsCacheSummary
 from .tokens import ActivityStats, Bucket, TokenAggregator, TokenSummary
@@ -247,6 +247,45 @@ def _fmt_age(secs: int) -> str:
     return f"{secs // 86400}d"
 
 
+def _trim(text: str, max_len: int) -> str:
+    if max_len <= 1:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _render_sub_agent(sa: SubAgentDetail, indent: str, width: int) -> list[str]:
+    """Render one sub-agent as 3 lines: header, prompt, current activity."""
+    color = _status_color(sa.status)
+    head_indent = indent + "└─ "
+    cont_indent = indent + "   "
+    desc = sa.description or ""
+    # Header: type, description, status, age
+    desc_budget = max(20, width - len(head_indent) - len(sa.agent_type) - 30)
+    head = (
+        f"{head_indent}{BOLD}Agent[{sa.agent_type}]{RESET}"
+        + (f"  {DIM}·{RESET}  {_trim(desc, desc_budget)}" if desc else "")
+        + f"  {color}[{sa.status}]{RESET}  "
+        f"{DIM}{_fmt_age(sa.last_activity_secs)}{RESET}"
+    )
+    lines = [head]
+    if sa.prompt_excerpt:
+        budget = max(20, width - len(cont_indent) - len("prompt: "))
+        body = _trim(sa.prompt_excerpt, budget)
+        line = f"{cont_indent}{DIM}prompt: {body}{RESET}" if not sa.is_active \
+            else f"{cont_indent}prompt: {DIM}{body}{RESET}"
+        lines.append(line)
+    if sa.last_event:
+        line = f"{cont_indent}now: {BOLD}{sa.last_event}{RESET}"
+        if sa.last_event_detail:
+            detail = sa.last_event_detail
+            max_detail = max(20, width - len(cont_indent) - len("now: ") - len(sa.last_event) - 5)
+            line += f"  {DIM}·{RESET}  {_trim(detail, max_detail)}"
+        lines.append(line)
+    return lines
+
+
 def render_agents(agents: Sequence[AgentDetail], width: int) -> list[str]:
     if not agents:
         return [DIM + "  (no running claude sessions)" + RESET]
@@ -276,10 +315,10 @@ def render_agents(agents: Sequence[AgentDetail], width: int) -> list[str]:
                 detail = a.last_event_detail
                 # Trim to fit
                 max_detail = max(20, width - len(sub_indent) - len("now: ") - len(a.last_event) - 5)
-                if len(detail) > max_detail:
-                    detail = detail[: max_detail - 1] + "…"
-                line += f"  {DIM}·{RESET}  {detail}"
+                line += f"  {DIM}·{RESET}  {_trim(detail, max_detail)}"
             out.append(line)
+        for sa in a.sub_agents:
+            out.extend(_render_sub_agent(sa, sub_indent, width))
         out.append("")
     return out
 

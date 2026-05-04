@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .sessions import Session, list_sessions
@@ -21,6 +21,37 @@ from .sessions import Session, list_sessions
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+
+# A sub-agent is "active" if its transcript was written within this many seconds.
+# Older transcripts are still shown but only up to SUB_AGENT_RECENT_LIMIT of them.
+SUB_AGENT_ACTIVE_SECS = 60
+SUB_AGENT_RECENT_LIMIT = 10
+
+
+@dataclass
+class SubAgentDetail:
+    agent_id: str                    # from filename: agent-<id>.jsonl
+    agent_type: str                  # from meta.json["agentType"]
+    description: str                 # from meta.json["description"]
+    prompt_excerpt: str              # first user record's prompt, ≤ 200 chars
+    last_activity_secs: int          # seconds since last jsonl write; -1 if unknown
+    last_event: str
+    last_event_detail: str
+    status: str
+    is_active: bool                  # mtime within SUB_AGENT_ACTIVE_SECS
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "agent_type": self.agent_type,
+            "description": self.description,
+            "prompt_excerpt": self.prompt_excerpt,
+            "last_activity_secs": self.last_activity_secs,
+            "last_event": self.last_event,
+            "last_event_detail": self.last_event_detail,
+            "status": self.status,
+            "is_active": self.is_active,
+        }
 
 
 @dataclass
@@ -42,6 +73,7 @@ class AgentDetail:
     last_event: str                  # "tool_use:Bash" / "assistant_text" / "user_msg" / "tool_result" / ""
     last_event_detail: str           # short excerpt (≤ 120 chars)
     status: str                      # "working" / "waiting" / "idle" / "unknown"
+    sub_agents: list[SubAgentDetail] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -60,6 +92,7 @@ class AgentDetail:
             "last_event": self.last_event,
             "last_event_detail": self.last_event_detail,
             "status": self.status,
+            "sub_agents": [sa.to_dict() for sa in self.sub_agents],
         }
 
 
@@ -113,6 +146,37 @@ def _find_jsonl(cwd: str, *session_ids: str) -> Path | None:
         if candidates:
             return candidates[0]
     return None
+
+
+def _read_first_record(path: Path, hard_cap_bytes: int = 256_000) -> dict | None:
+    """Read the first jsonl line and return the decoded record.
+
+    A single line can be many KB (long prompts), so we read in 16 KB chunks
+    until we hit a newline or the hard cap.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        with path.open("rb") as f:
+            while total < hard_cap_bytes:
+                buf = f.read(16_384)
+                if not buf:
+                    break
+                nl = buf.find(b"\n")
+                if nl >= 0:
+                    chunks.append(buf[:nl])
+                    break
+                chunks.append(buf)
+                total += len(buf)
+    except OSError:
+        return None
+    line = b"".join(chunks).decode("utf-8", errors="ignore").strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
 
 
 def _tail_lines(path: Path, max_bytes: int = 16_000) -> list[dict]:
@@ -211,6 +275,100 @@ def _derive_status(records: list[dict], age_secs: int) -> str:
     return "stale"
 
 
+def _extract_prompt_text(record: dict) -> str:
+    """Pull a usable prompt excerpt from a sub-agent's first user record."""
+    msg = record.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                return c.get("text") or ""
+        # Fall back: stringify whatever's there
+        return " ".join(str(c) for c in content if c)
+    return ""
+
+
+def _list_sub_agents(parent_jsonl: Path, now: float) -> list[SubAgentDetail]:
+    """Return sub-agents for a parent session.
+
+    Includes all sub-agents whose transcript was written within
+    SUB_AGENT_ACTIVE_SECS (active/just-finished) plus up to
+    SUB_AGENT_RECENT_LIMIT older completed ones (most recent first).
+    """
+    subagents_dir = parent_jsonl.parent / parent_jsonl.stem / "subagents"
+    if not subagents_dir.is_dir():
+        return []
+
+    files: list[tuple[Path, float]] = []
+    for p in subagents_dir.glob("agent-*.jsonl"):
+        try:
+            files.append((p, p.stat().st_mtime))
+        except OSError:
+            continue
+    if not files:
+        return []
+    files.sort(key=lambda t: t[1], reverse=True)
+
+    active: list[tuple[Path, float]] = []
+    completed: list[tuple[Path, float]] = []
+    for path, mtime in files:
+        if (now - mtime) < SUB_AGENT_ACTIVE_SECS:
+            active.append((path, mtime))
+        else:
+            completed.append((path, mtime))
+    kept = active + completed[:SUB_AGENT_RECENT_LIMIT]
+
+    out: list[SubAgentDetail] = []
+    for path, mtime in kept:
+        agent_id = path.stem
+        if agent_id.startswith("agent-"):
+            agent_id = agent_id[len("agent-"):]
+        meta_path = path.with_suffix(".meta.json")
+        agent_type = "agent"
+        description = ""
+        if meta_path.exists():
+            try:
+                with meta_path.open() as f:
+                    meta = json.load(f)
+                agent_type = meta.get("agentType") or agent_type
+                description = meta.get("description") or ""
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        first = _read_first_record(path)
+        prompt_excerpt = ""
+        if first is not None:
+            text = _extract_prompt_text(first)
+            prompt_excerpt = text.replace("\n", " ").strip()[:200]
+
+        records = _tail_lines(path)
+        convo = [r for r in records if r.get("type") in ("assistant", "user")]
+        last_event = ""
+        last_detail = ""
+        if convo:
+            last_event, last_detail = _summarize_event(convo[-1])
+        last_age = int(now - mtime)
+        status = _derive_status(convo, last_age)
+        is_active = last_age < SUB_AGENT_ACTIVE_SECS
+
+        out.append(
+            SubAgentDetail(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                description=description,
+                prompt_excerpt=prompt_excerpt,
+                last_activity_secs=last_age,
+                last_event=last_event,
+                last_event_detail=last_detail,
+                status=status,
+                is_active=is_active,
+            )
+        )
+    return out
+
+
 def list_agents() -> list[AgentDetail]:
     out: list[AgentDetail] = []
     now = time.time()
@@ -225,6 +383,7 @@ def list_agents() -> list[AgentDetail]:
         last_event = ""
         last_detail = ""
         last_age = -1
+        sub_agents: list[SubAgentDetail] = []
         if jsonl:
             try:
                 last_age = int(now - jsonl.stat().st_mtime)
@@ -237,6 +396,7 @@ def list_agents() -> list[AgentDetail]:
             if convo:
                 last_event, last_detail = _summarize_event(convo[-1])
             status = _derive_status(convo, last_age)
+            sub_agents = _list_sub_agents(jsonl, now)
         else:
             status = "unknown"
             records = []
@@ -257,6 +417,7 @@ def list_agents() -> list[AgentDetail]:
                 last_event=last_event,
                 last_event_detail=last_detail,
                 status=status,
+                sub_agents=sub_agents,
             )
         )
     out.sort(key=lambda a: (not a.is_current, -1 if a.last_activity_secs < 0 else a.last_activity_secs, a.pid))
