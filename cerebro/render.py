@@ -461,7 +461,7 @@ def _format_interactions(
         ts_u = _short_ts(intr.user_ts)
         u_meta = f" {DIM}· {ts_u}{RESET}" if ts_u else ""
         out.append(f"{BOLD}{user_label}{RESET}{u_meta}")
-        for line in _wrap_plain(intr.user_text, body_w)[:3]:
+        for line in _wrap_plain(intr.user_text, body_w):
             out.append("  " + line)
         ts_a = _short_ts(intr.assistant_ts)
         tools_str = (
@@ -483,7 +483,7 @@ def _format_interactions(
         out.append(f"{BOLD}AI{RESET} {head_extra}")
         body = intr.assistant_text or ("…" if intr.in_progress else "")
         if body:
-            for line in _wrap_plain(body, body_w)[:4]:
+            for line in _wrap_plain(body, body_w):
                 out.append("  " + line)
     return out
 

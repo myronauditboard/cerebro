@@ -231,6 +231,81 @@ def _tail_lines(path: Path, max_bytes: int = 256_000) -> list[dict]:
     return out
 
 
+def _is_user_text_record(rec: dict) -> bool:
+    if rec.get("type") != "user":
+        return False
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        s = content.strip()
+        return bool(s) and not s.startswith("<command-name>") and not s.startswith("[Request interrupted")
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                t = (c.get("text") or "").strip()
+                if t and not t.startswith("<command-name>"):
+                    return True
+    return False
+
+
+def _read_until_n_user_records(
+    path: Path, target: int = 10, chunk_size: int = 256_000, max_bytes: int = 16_000_000
+) -> list[dict]:
+    """Walk the jsonl backwards in chunks until we have ≥ target user-text records,
+    or we hit the start of the file, or we've read max_bytes. Returns records in
+    chronological order. Avoids pulling huge sessions in full."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size == 0:
+        return []
+
+    parsed: list[dict] = []  # newest chunks at the front; we prepend earlier chunks
+    user_count = 0
+    pos = size
+    bytes_read = 0
+    try:
+        with path.open("rb") as f:
+            while pos > 0 and bytes_read < max_bytes:
+                new_pos = max(0, pos - chunk_size)
+                read_len = pos - new_pos
+                f.seek(new_pos)
+                data = f.read(read_len)
+                pos = new_pos
+                bytes_read += read_len
+
+                # Drop the first (partial) line unless we've reached the start.
+                if pos > 0:
+                    nl = data.find(b"\n")
+                    if nl < 0:
+                        # No line boundary in this chunk — keep going.
+                        continue
+                    chunk_text = data[nl + 1 :].decode("utf-8", errors="ignore")
+                else:
+                    chunk_text = data.decode("utf-8", errors="ignore")
+
+                chunk_records: list[dict] = []
+                for line in chunk_text.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    chunk_records.append(r)
+                    if _is_user_text_record(r):
+                        user_count += 1
+                # Earlier chunks go to the front
+                parsed = chunk_records + parsed
+                if user_count >= target:
+                    break
+    except OSError:
+        return parsed
+    return parsed
+
+
 def _summarize_event(d: dict) -> tuple[str, str]:
     """Return (short_event_label, short_detail) for one jsonl record."""
     msg = d.get("message") or {}
@@ -538,7 +613,11 @@ def list_agents() -> list[AgentDetail]:
                 last_event, last_detail = _summarize_event(convo[-1])
             status = _derive_status(convo, last_age)
             sub_agents = _list_sub_agents(jsonl, now)
-            recent = _recent_interactions(convo)
+            # Read further back to cover at least 10 user prompts. For long
+            # sessions the 256 KB tail above only covers a handful of turns.
+            deep_records = _read_until_n_user_records(jsonl, target=10)
+            deep_convo = [r for r in deep_records if r.get("type") in ("assistant", "user")]
+            recent = _recent_interactions(deep_convo)
         else:
             status = "unknown"
             records = []
