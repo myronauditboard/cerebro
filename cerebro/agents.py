@@ -141,37 +141,57 @@ def _encode_cwd(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 
-def _find_jsonl(cwd: str, *session_ids: str) -> Path | None:
+def _find_jsonl(
+    cwd: str, *session_ids: str, meta_updated_at_ms: int | None = None
+) -> Path | None:
     """Locate the active jsonl for a session.
 
-    Tries each candidate session id (resume_id, then metadata sessionId), then falls
-    back to the most-recently-modified jsonl in the cwd's encoded project dir —
-    that's the one currently being appended to.
+    Claude Code can rotate the sessionId of a running process (e.g. after
+    /clear or compaction) without updating ~/.claude/sessions/<pid>.json's
+    `sessionId` field — so trusting that field alone returns a stale file.
+    The same metadata file *does* update `updatedAt` though, so the right
+    transcript is whichever jsonl in the cwd's project dir has the mtime
+    closest to `meta_updated_at_ms`. That also disambiguates the case where
+    multiple claude processes share a cwd: each has its own updatedAt.
+
+    Falls back to sessionId match, then most-recently-modified, then a
+    cross-project sessionId scan.
     """
     proj_dir = (PROJECTS_DIR / _encode_cwd(cwd)) if cwd else None
 
-    for sid in session_ids:
-        if not sid:
-            continue
-        if proj_dir is not None:
-            cand = proj_dir / f"{sid}.jsonl"
-            if cand.exists():
-                return cand
-        # Cross-project fallback for a known sid
+    candidates: list[tuple[Path, float]] = []
+    if proj_dir is not None and proj_dir.is_dir():
+        for p in proj_dir.glob("*.jsonl"):
+            try:
+                candidates.append((p, p.stat().st_mtime))
+            except OSError:
+                continue
+
+    # Primary signal: closest mtime to the metadata's `updatedAt`.
+    if meta_updated_at_ms and candidates:
+        meta_t = meta_updated_at_ms / 1000.0
+        best = min(candidates, key=lambda t: abs(t[1] - meta_t))
+        return best[0]
+
+    # Fallback 1: sessionId match within proj_dir.
+    sids = [s for s in session_ids if s]
+    for sid in sids:
+        for p, _m in candidates:
+            if p.stem == sid:
+                return p
+
+    # Fallback 2: most-recently-modified jsonl in proj_dir.
+    if candidates:
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        return candidates[0][0]
+
+    # Fallback 3: cross-project sessionId scan.
+    for sid in sids:
         for proj in PROJECTS_DIR.glob("*"):
             cand = proj / f"{sid}.jsonl"
             if cand.exists():
                 return cand
 
-    # Last resort: pick the most-recently-modified jsonl in this project dir.
-    if proj_dir is not None and proj_dir.is_dir():
-        candidates = sorted(
-            (p for p in proj_dir.glob("*.jsonl")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if candidates:
-            return candidates[0]
     return None
 
 
@@ -232,20 +252,7 @@ def _tail_lines(path: Path, max_bytes: int = 256_000) -> list[dict]:
 
 
 def _is_user_text_record(rec: dict) -> bool:
-    if rec.get("type") != "user":
-        return False
-    msg = rec.get("message") or {}
-    content = msg.get("content")
-    if isinstance(content, str):
-        s = content.strip()
-        return bool(s) and not s.startswith("<command-name>") and not s.startswith("[Request interrupted")
-    if isinstance(content, list):
-        for c in content:
-            if isinstance(c, dict) and c.get("type") == "text":
-                t = (c.get("text") or "").strip()
-                if t and not t.startswith("<command-name>"):
-                    return True
-    return False
+    return rec.get("type") == "user" and bool(_user_text_content(rec))
 
 
 def _read_until_n_user_records(
@@ -352,22 +359,37 @@ def _summarize_event(d: dict) -> tuple[str, str]:
     return (role or "", "")
 
 
+_USER_STUB_PREFIXES = (
+    "<command-name>",
+    "<local-command-",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "[Request interrupted",
+    "[Image: source:",
+)
+
+
+def _is_internal_user_stub(text: str) -> bool:
+    s = text.strip()
+    if not s:
+        return True
+    return any(s.startswith(p) for p in _USER_STUB_PREFIXES)
+
+
 def _user_text_content(rec: dict) -> str:
     """Return the human-prompt text from a user record, or '' if it's a tool_result-only
-    record or an internal stub like a slash-command invocation."""
+    record or an internal stub (slash-command wrapper, image attachment metadata, etc.)."""
     msg = rec.get("message") or {}
     content = msg.get("content")
     if isinstance(content, str):
-        s = content.strip()
-        if s.startswith("<command-name>") or s.startswith("[Request interrupted"):
-            return ""
-        return s
+        return "" if _is_internal_user_stub(content) else content.strip()
     if isinstance(content, list):
         pieces: list[str] = []
         for c in content:
             if isinstance(c, dict) and c.get("type") == "text":
                 t = c.get("text") or ""
-                if t.strip().startswith("<command-name>"):
+                if _is_internal_user_stub(t):
                     continue
                 pieces.append(t)
         return "\n".join(pieces).strip()
@@ -594,7 +616,9 @@ def list_agents() -> list[AgentDetail]:
         name = meta.get("name") or "—"
         kind = meta.get("kind") or ""
         proc_start = meta.get("procStart") or ""
-        jsonl = _find_jsonl(s.cwd, s.resume_id, meta_sid)
+        jsonl = _find_jsonl(
+            s.cwd, s.resume_id, meta_sid, meta_updated_at_ms=meta.get("updatedAt")
+        )
         last_event = ""
         last_detail = ""
         last_age = -1
