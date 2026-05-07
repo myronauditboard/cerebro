@@ -12,6 +12,7 @@ The result is a list of AgentDetail records, one per running session.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,10 @@ SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 # Older transcripts are still shown but only up to SUB_AGENT_RECENT_LIMIT of them.
 SUB_AGENT_ACTIVE_SECS = 60
 SUB_AGENT_RECENT_LIMIT = 10
+
+# Cap on top-level agents shown in the Agents tab — the 10 jsonls with the
+# most-recent mtime (live or finished, including `claude -p` runs).
+RECENT_AGENTS_LIMIT = 10
 
 
 @dataclass
@@ -83,29 +88,33 @@ class SubAgentDetail:
 
 @dataclass
 class AgentDetail:
-    pid: int
+    # pid/tty/age/is_current are only meaningful when the underlying claude
+    # process is still running. For finished sessions they default to None/"".
+    pid: int | None
+    is_live: bool
     is_current: bool
     cwd: str
     repo: str
     branch: str
     age: str
     tty: str
-    # From sessions/<pid>.json (may be absent → defaults)
+    # From sessions/<pid>.json or derived from the jsonl when no live process
     name: str
     session_id: str
     kind: str
     proc_start: str
-    # Derived from the session's jsonl tail
+    # Derived from the jsonl tail
     last_activity_secs: int          # seconds since the last jsonl line was written; -1 if unknown
     last_event: str                  # "tool_use:Bash" / "assistant_text" / "user_msg" / "tool_result" / ""
     last_event_detail: str           # short excerpt (≤ 120 chars)
-    status: str                      # "working" / "waiting" / "idle" / "unknown"
+    status: str                      # "working" / "waiting" / "idle" / "stale" / "finished" / "unknown"
     sub_agents: list[SubAgentDetail] = field(default_factory=list)
     recent_interactions: list[Interaction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "pid": self.pid,
+            "is_live": self.is_live,
             "is_current": self.is_current,
             "cwd": self.cwd,
             "repo": self.repo,
@@ -646,56 +655,157 @@ def _list_sub_agents(parent_jsonl: Path, now: float) -> list[SubAgentDetail]:
     return out
 
 
+def _all_session_jsonls() -> list[tuple[Path, float]]:
+    """Return every top-level session jsonl across all project dirs (with mtimes).
+
+    Excludes sub-agent transcripts under `<sessionId>/subagents/agent-*.jsonl`,
+    which live one directory deeper.
+    """
+    out: list[tuple[Path, float]] = []
+    if not PROJECTS_DIR.is_dir():
+        return out
+    for proj_dir in PROJECTS_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for entry in proj_dir.iterdir():
+            if entry.is_file() and entry.suffix == ".jsonl":
+                try:
+                    out.append((entry, entry.stat().st_mtime))
+                except OSError:
+                    continue
+    return out
+
+
+def _ai_title_from_path(jsonl: Path) -> str:
+    """Read the most recent ai-title aiTitle value from a jsonl tail."""
+    try:
+        size = jsonl.stat().st_size
+        with jsonl.open("rb") as f:
+            f.seek(max(0, size - 65_536))
+            data = f.read()
+    except OSError:
+        return ""
+    text = data.decode("utf-8", errors="ignore")
+    for line in reversed(text.split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("type") == "ai-title":
+            return (r.get("aiTitle") or "").strip()
+    return ""
+
+
+def _meta_from_jsonl(jsonl: Path) -> dict:
+    """Pull cwd / sessionId / gitBranch from the jsonl's records (first
+    available wins). Used for finished sessions where there's no
+    sessions/<pid>.json to read."""
+    out = {"cwd": "", "session_id": "", "branch": ""}
+    head = _read_first_record(jsonl)
+    if head is not None:
+        if head.get("cwd"):
+            out["cwd"] = head["cwd"]
+        if head.get("sessionId"):
+            out["session_id"] = head["sessionId"]
+        if head.get("gitBranch"):
+            out["branch"] = head["gitBranch"]
+    if not (out["cwd"] and out["session_id"] and out["branch"]):
+        for rec in _tail_lines(jsonl, max_bytes=8_000):
+            if not out["cwd"] and rec.get("cwd"):
+                out["cwd"] = rec["cwd"]
+            if not out["session_id"] and rec.get("sessionId"):
+                out["session_id"] = rec["sessionId"]
+            if not out["branch"] and rec.get("gitBranch"):
+                out["branch"] = rec["gitBranch"]
+            if out["cwd"] and out["session_id"] and out["branch"]:
+                break
+    if not out["session_id"]:
+        out["session_id"] = jsonl.stem
+    return out
+
+
 def list_agents() -> list[AgentDetail]:
-    out: list[AgentDetail] = []
+    """Return the most-recently-active agents (live or finished), capped at
+    RECENT_AGENTS_LIMIT, ranked by jsonl mtime."""
     now = time.time()
+
+    # Map jsonl path → live Session, so we know which top-N entries are live.
+    live_by_path: dict[Path, Session] = {}
     for s in list_sessions(include_branch=True):
         meta = _load_session_meta(s.pid)
         meta_sid = meta.get("sessionId") or ""
-        session_id = s.resume_id or meta_sid
-        name = meta.get("name") or "—"
-        kind = meta.get("kind") or ""
-        proc_start = meta.get("procStart") or ""
-        jsonl = _find_jsonl(
+        active_jsonl = _find_jsonl(
             s.cwd, s.resume_id, meta_sid, meta_updated_at_ms=meta.get("updatedAt")
         )
+        if active_jsonl is not None:
+            live_by_path[active_jsonl] = s
+
+    jsonls = _all_session_jsonls()
+    jsonls.sort(key=lambda t: t[1], reverse=True)
+    jsonls = jsonls[:RECENT_AGENTS_LIMIT]
+
+    out: list[AgentDetail] = []
+    for jsonl, mtime in jsonls:
+        last_age = int(now - mtime)
+        live = live_by_path.get(jsonl)
+        is_live = live is not None
+
+        if live is not None:
+            meta = _load_session_meta(live.pid)
+            session_id = live.resume_id or meta.get("sessionId") or jsonl.stem
+            name = (meta.get("name") or "").strip() or _ai_title_from_path(jsonl)
+            kind = meta.get("kind") or ""
+            proc_start = meta.get("procStart") or ""
+            cwd = live.cwd
+            repo = live.repo
+            branch = live.branch
+            age = live.age
+            tty = live.tty
+            pid: int | None = live.pid
+            is_current = live.is_current
+        else:
+            jmeta = _meta_from_jsonl(jsonl)
+            session_id = jmeta["session_id"]
+            cwd = jmeta["cwd"]
+            repo = os.path.basename(cwd) if cwd else ""
+            branch = jmeta["branch"]
+            name = _ai_title_from_path(jsonl)
+            kind = ""
+            proc_start = ""
+            age = ""
+            tty = ""
+            pid = None
+            is_current = False
+
+        records = _tail_lines(jsonl)
+        convo = [r for r in records if r.get("type") in ("assistant", "user")]
         last_event = ""
         last_detail = ""
-        last_age = -1
-        sub_agents: list[SubAgentDetail] = []
-        recent: list[Interaction] = []
-        if jsonl:
-            try:
-                last_age = int(now - jsonl.stat().st_mtime)
-            except OSError:
-                last_age = -1
-            records = _tail_lines(jsonl)
-            # Only conversational records carry "what's happening" — skip system pings,
-            # pr-link refs, summaries, etc.
-            convo = [r for r in records if r.get("type") in ("assistant", "user")]
-            if convo:
-                last_event, last_detail = _summarize_event(convo[-1])
+        if convo:
+            last_event, last_detail = _summarize_event(convo[-1])
+        if is_live:
             status = _derive_status(convo, last_age)
-            sub_agents = _list_sub_agents(jsonl, now)
-            # Read further back to cover at least 10 user prompts. For long
-            # sessions the 256 KB tail above only covers a handful of turns.
-            # Pass the full record stream so queue-operation events (pending
-            # queued prompts) come through alongside user/assistant records.
-            deep_records = _read_until_n_user_records(jsonl, target=10)
-            recent = _recent_interactions(deep_records)
         else:
-            status = "unknown"
-            records = []
+            status = "finished"
+
+        sub_agents = _list_sub_agents(jsonl, now)
+        deep_records = _read_until_n_user_records(jsonl, target=10)
+        recent = _recent_interactions(deep_records)
+
         out.append(
             AgentDetail(
-                pid=s.pid,
-                is_current=s.is_current,
-                cwd=s.cwd,
-                repo=s.repo,
-                branch=s.branch,
-                age=s.age,
-                tty=s.tty,
-                name=name,
+                pid=pid,
+                is_live=is_live,
+                is_current=is_current,
+                cwd=cwd,
+                repo=repo,
+                branch=branch,
+                age=age,
+                tty=tty,
+                name=name or "—",
                 session_id=session_id,
                 kind=kind,
                 proc_start=proc_start,
@@ -707,5 +817,4 @@ def list_agents() -> list[AgentDetail]:
                 recent_interactions=recent,
             )
         )
-    out.sort(key=lambda a: (not a.is_current, -1 if a.last_activity_secs < 0 else a.last_activity_secs, a.pid))
     return out

@@ -248,6 +248,7 @@ def _status_color(status: str) -> str:
         "active": f"{CSI}36m",    # cyan
         "idle": f"{CSI}90m",      # bright black
         "stale": f"{CSI}90m",
+        "finished": f"{CSI}35m",  # magenta — distinguishes "process gone" from "live but quiet"
         "unknown": f"{CSI}90m",
     }.get(status, "")
 
@@ -419,33 +420,45 @@ SPLIT_GAP = " │ "          # column separator between nav and detail
 def _agent_label(a: AgentDetail) -> str:
     if a.name and a.name != "—":
         label = a.name
-    else:
+    elif a.pid is not None:
         label = SUBTAB_LABEL_FALLBACK.format(pid=a.pid)
+    else:
+        sid = a.session_id or "?"
+        label = sid[:8] + ("…" if len(sid) > 8 else "")
     if len(label) > SUBTAB_LABEL_MAX:
         label = label[: SUBTAB_LABEL_MAX - 1] + "…"
     return label
 
 
+def _agent_key(a: AgentDetail) -> str:
+    """Stable id for tracking the active sub-tab — works for both live (pid)
+    and finished (session_id) agents."""
+    return a.session_id or (f"pid:{a.pid}" if a.pid is not None else "?")
+
+
 def render_agent_subtabs(
-    agents: Sequence[AgentDetail], active_pid: int | None, width: int
-) -> tuple[str, list[tuple[int, int, int]]]:
+    agents: Sequence[AgentDetail], active_id: str | None, width: int
+) -> tuple[str, list[tuple[int, int, str]]]:
     """Render the per-agent sub-tab row and return (rendered_string, click_ranges).
 
-    Each click_range is (col_start, col_end, pid), 1-indexed inclusive.
+    Each click_range is (col_start, col_end, agent_id), 1-indexed inclusive,
+    where agent_id is the session_id (or pid-fallback) of the chip.
     """
     if not agents:
-        return (DIM + "  (no running claude sessions)" + RESET, [])
+        return (DIM + "  (no recent claude sessions)" + RESET, [])
     parts: list[str] = [SUBTAB_PREFIX]
-    ranges: list[tuple[int, int, int]] = []
+    ranges: list[tuple[int, int, str]] = []
     col = len(SUBTAB_PREFIX) + 1  # 1-indexed
     for i, a in enumerate(agents):
         label = _agent_label(a)
         chip_w = len(label) + 2  # one space on each side
-        if a.pid == active_pid:
+        key = _agent_key(a)
+        if key == active_id:
             parts.append(f"{CSI}48;5;60m{CSI}1;97m {label} {RESET}")
         else:
+            # Finished agents render slightly more dim to distinguish at a glance.
             parts.append(f"{DIM} {label} {RESET}")
-        ranges.append((col, col + chip_w - 1, a.pid))
+        ranges.append((col, col + chip_w - 1, key))
         col += chip_w
         if i < len(agents) - 1:
             parts.append(SUBTAB_SEPARATOR)
@@ -574,8 +587,17 @@ def _render_agent_detail(
         # The parent agent itself
         color = _status_color(agent.status)
         marker = "* " if agent.is_current else ""
+        if agent.pid is not None:
+            head_prefix = f"{marker}{BOLD}PID {agent.pid}{RESET}  "
+        else:
+            sid_short = (
+                agent.session_id[:8] + "…"
+                if agent.session_id and len(agent.session_id) > 9
+                else (agent.session_id or "?")
+            )
+            head_prefix = f"{BOLD}session {sid_short}{RESET}  "
         out.append(
-            f"{marker}{BOLD}PID {agent.pid}{RESET}  "
+            f"{head_prefix}"
             f"{color}[{agent.status}]{RESET}  "
             f"last activity {_fmt_age(agent.last_activity_secs)} ago"
         )
@@ -584,8 +606,14 @@ def _render_agent_detail(
         repo_branch = agent.repo or "—"
         if agent.branch:
             repo_branch += f"  ({agent.branch})"
-        out.append(f"{DIM}{repo_branch}  ·  tty {agent.tty}  ·  age {agent.age}{RESET}")
-        if agent.session_id:
+        # Live agents have tty + age; finished ones don't (process is gone).
+        if agent.is_live and agent.tty:
+            out.append(
+                f"{DIM}{repo_branch}  ·  tty {agent.tty}  ·  age {agent.age}{RESET}"
+            )
+        else:
+            out.append(f"{DIM}{repo_branch}{RESET}")
+        if agent.session_id and agent.pid is not None:
             sid = agent.session_id[:8] + "…" if len(agent.session_id) > 9 else agent.session_id
             out.append(f"{DIM}session {sid}{RESET}")
         if agent.last_event:
@@ -651,11 +679,11 @@ def render_frame(
     sessions: Sequence[Session],
     stats_cache: StatsCacheSummary,
     agents: Sequence[AgentDetail],
-    active_pid: int | None,
+    active_id: str | None,
     nav_index: int,
     width: int,
     mouse_enabled: bool = True,
-) -> tuple[str, int, list[tuple[int, int, int]]]:
+) -> tuple[str, int, list[tuple[int, int, str]]]:
     """Render a complete frame.
 
     Returns (frame_text, sticky_top_lines, subtab_click_ranges). The sub-tab row is
@@ -666,15 +694,15 @@ def render_frame(
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
     out.append(render_tabs_header(tab))
     out.append("")
-    subtab_ranges: list[tuple[int, int, int]] = []
+    subtab_ranges: list[tuple[int, int, str]] = []
     sticky_top = _STICKY_TOP
     if tab == "agents":
-        subtab_line, subtab_ranges = render_agent_subtabs(agents, active_pid, width)
+        subtab_line, subtab_ranges = render_agent_subtabs(agents, active_id, width)
         out.append(subtab_line)
         out.append("")
         sticky_top = _STICKY_TOP + 2
         # Body
-        active = next((a for a in agents if a.pid == active_pid), None)
+        active = next((a for a in agents if _agent_key(a) == active_id), None)
         if not agents:
             pass  # subtab_line already says "(no running claude sessions)"
         elif width < SPLIT_MIN_WIDTH or active is None:
@@ -843,11 +871,13 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
     tab_ranges = tab_layout()
     # Per-tab scroll offset so switching back to a tab restores its position.
     scroll_offsets: dict[str, int] = {name: 0 for name in TABS}
-    # Agents-tab state: which agent is the active sub-tab, and which nav item is
+    # Agents-tab state: which agent's chip is active and which nav item is
     # selected within that agent (0 = the agent itself, 1+ = its sub-agents).
-    active_agent_pid: int | None = None
-    nav_indices: dict[int, int] = {}        # pid → nav_index
-    subtab_ranges: list[tuple[int, int, int]] = []
+    # Keyed by `_agent_key(agent)` (session_id) since pid is None for finished
+    # agents.
+    active_agent_id: str | None = None
+    nav_indices: dict[str, int] = {}        # agent_key → nav_index
+    subtab_ranges: list[tuple[int, int, str]] = []
     last_term_rows = {"v": 24}
     # Selection mode: when False, mouse tracking is off and refresh is paused so
     # the terminal's native click-drag selection works for copy/paste.
@@ -894,26 +924,25 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 stats_cache = sc_mod.load()
                 agents = list_agents() if tab == "agents" else []
 
-                # Reconcile active_agent_pid with the current agents list.
+                # Reconcile active_agent_id with the current agents list.
                 if tab == "agents":
-                    pids = [a.pid for a in agents]
-                    if active_agent_pid not in pids:
-                        active_agent_pid = pids[0] if pids else None
-                    # Clamp this agent's nav_index against its current sub-agent count.
-                    if active_agent_pid is not None:
-                        active = next(a for a in agents if a.pid == active_agent_pid)
+                    keys = [_agent_key(a) for a in agents]
+                    if active_agent_id not in keys:
+                        active_agent_id = keys[0] if keys else None
+                    if active_agent_id is not None:
+                        active = next(a for a in agents if _agent_key(a) == active_agent_id)
                         max_idx = len(active.sub_agents)  # 0..len inclusive
-                        cur = nav_indices.get(active_agent_pid, 0)
-                        nav_indices[active_agent_pid] = max(0, min(cur, max_idx))
+                        cur = nav_indices.get(active_agent_id, 0)
+                        nav_indices[active_agent_id] = max(0, min(cur, max_idx))
 
-                nav_index = nav_indices.get(active_agent_pid, 0) if active_agent_pid is not None else 0
+                nav_index = nav_indices.get(active_agent_id, 0) if active_agent_id is not None else 0
                 frame, sticky_top, subtab_ranges = render_frame(
                     tab=tab,
                     summary=summary,
                     sessions=sessions,
                     stats_cache=stats_cache,
                     agents=agents,
-                    active_pid=active_agent_pid,
+                    active_id=active_agent_id,
                     nav_index=nav_index,
                     width=cols,
                     mouse_enabled=mouse_state["on"],
@@ -927,28 +956,30 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
             needs_redraw["flag"] = False
 
             def _cycle_subtab(delta: int) -> None:
-                nonlocal active_agent_pid
+                nonlocal active_agent_id
                 if not agents:
                     return
-                pids = [a.pid for a in agents]
-                if active_agent_pid in pids:
-                    i = pids.index(active_agent_pid)
+                keys = [_agent_key(a) for a in agents]
+                if active_agent_id in keys:
+                    i = keys.index(active_agent_id)
                 else:
                     i = 0
-                active_agent_pid = pids[(i + delta) % len(pids)]
+                active_agent_id = keys[(i + delta) % len(keys)]
                 # New tab → reset detail scroll
                 scroll_offsets[tab] = 0
                 needs_redraw["flag"] = True
 
             def _move_nav(delta: int) -> None:
-                if active_agent_pid is None:
+                if active_agent_id is None:
                     return
-                active = next((a for a in agents if a.pid == active_agent_pid), None)
+                active = next(
+                    (a for a in agents if _agent_key(a) == active_agent_id), None
+                )
                 if active is None:
                     return
                 max_idx = len(active.sub_agents)  # 0..len inclusive
-                cur = nav_indices.get(active_agent_pid, 0)
-                nav_indices[active_agent_pid] = max(0, min(cur + delta, max_idx))
+                cur = nav_indices.get(active_agent_id, 0)
+                nav_indices[active_agent_id] = max(0, min(cur + delta, max_idx))
                 scroll_offsets[tab] = 0
                 needs_redraw["flag"] = True
 
@@ -1048,10 +1079,10 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                                     _switch(name)
                                     break
                         elif button == 0 and on_agents and row == SUBTAB_ROW:
-                            for c_start, c_end, pid in subtab_ranges:
+                            for c_start, c_end, key in subtab_ranges:
                                 if c_start <= col <= c_end:
-                                    if pid != active_agent_pid:
-                                        active_agent_pid = pid
+                                    if key != active_agent_id:
+                                        active_agent_id = key
                                         scroll_offsets[tab] = 0
                                         needs_redraw["flag"] = True
                                     break
@@ -1082,14 +1113,14 @@ def once(include_branch: bool = True, tab: str = "overview") -> None:
     sessions = list_sessions(include_branch=include_branch)
     stats_cache = sc_mod.load()
     agents = list_agents() if tab == "agents" else []
-    active_pid = agents[0].pid if agents else None
+    active_id = _agent_key(agents[0]) if agents else None
     frame, _sticky, _ranges = render_frame(
         tab=tab,
         summary=summary,
         sessions=sessions,
         stats_cache=stats_cache,
         agents=agents,
-        active_pid=active_pid,
+        active_id=active_id,
         nav_index=0,
         width=cols,
     )
