@@ -12,6 +12,7 @@ from pathlib import Path
 
 _CLAUDE_CMD_RE = re.compile(r"^claude($|[ ]|--)")
 _SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
 @dataclass
@@ -42,17 +43,68 @@ class Session:
         }
 
 
-def _session_meta(pid: int) -> tuple[str, int]:
-    """Return (name, updated_at_ms) from ~/.claude/sessions/<pid>.json."""
+def _session_meta(pid: int) -> tuple[str, int, str]:
+    """Return (name, updated_at_ms, session_id) from ~/.claude/sessions/<pid>.json."""
     p = _SESSIONS_DIR / f"{pid}.json"
     try:
         with p.open() as f:
             d = json.load(f)
         name = (d.get("name") or "").strip()
         updated = int(d.get("updatedAt") or 0)
-        return (name, updated)
+        session_id = (d.get("sessionId") or "").strip()
+        return (name, updated, session_id)
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return ("", 0)
+        return ("", 0, "")
+
+
+def _ai_title_from_jsonl(cwd: str, session_id: str) -> str:
+    """Tail the session's jsonl for the most recent `ai-title` record.
+
+    Claude Code writes these into the transcript whenever it derives or
+    refreshes the auto-generated session title; the latest one wins.
+    """
+    if not cwd:
+        return ""
+    proj_dir = _PROJECTS_DIR / cwd.replace("/", "-")
+    if not proj_dir.is_dir():
+        return ""
+    # Try the named jsonl first; fall back to most-recently-modified in the dir.
+    candidates: list[Path] = []
+    if session_id:
+        named = proj_dir / f"{session_id}.jsonl"
+        if named.exists():
+            candidates.append(named)
+    if not candidates:
+        try:
+            jsonls = sorted(
+                proj_dir.glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return ""
+        if jsonls:
+            candidates.append(jsonls[0])
+    for path in candidates:
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as f:
+                f.seek(max(0, size - 65_536))
+                data = f.read()
+        except OSError:
+            continue
+        text = data.decode("utf-8", errors="ignore")
+        for line in reversed(text.split("\n")):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("type") == "ai-title":
+                return (r.get("aiTitle") or "").strip()
+    return ""
 
 
 def _condense_etime(etime: str) -> str:
@@ -183,7 +235,9 @@ def list_sessions(include_branch: bool = True) -> list[Session]:
         cwd = _cwd_for(pid)
         repo = os.path.basename(cwd) if cwd else ""
         branch = _branch_for(cwd) if include_branch else ""
-        name, updated_at_ms = _session_meta(pid)
+        name, updated_at_ms, sid = _session_meta(pid)
+        if not name:
+            name = _ai_title_from_jsonl(cwd, sid)
         sessions.append(
             Session(
                 pid=pid,
