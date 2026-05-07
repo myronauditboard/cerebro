@@ -15,9 +15,10 @@ cerebro — claude code activity
    Overview     Agents
 
 ┌─────────────────────────────────── Tokens ────────────────────────────────────┐
-│  Today    raw     322 · cache  42.46M · out  98.07K · bill  98.39K ·   77 msg │
-│  Week     raw  14.64K · cache 664.94M · out   3.05M · bill   3.06M · 2605 msg │
-│  Lifetime raw  30.77K · cache   1.27B · out   4.39M · bill   4.43M · 6662 msg │
+│  Period          Raw      Cache        Out   Billable   Messages   Sessions   │
+│  Today           322     42.46M     98.07K     98.39K         77          2   │
+│  Week         14.64K    664.94M      3.05M      3.06M       2605          5   │
+│  Lifetime     30.77K      1.27B      4.39M      4.43M       6662         63   │
 └───────────────────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────── Stats ─────────────────────────────────────┐
 │  Period            Billable    Messages    Sessions                           │
@@ -132,14 +133,18 @@ changed files are read from the previously-recorded byte offset onward.
 
 | Column | Meaning |
 |---|---|
-| `raw` | Raw input tokens (no cache reads, no cache writes) |
-| `cache` | `cache_creation_input_tokens + cache_read_input_tokens` |
-| `out` | Output tokens |
-| `bill` | `raw + out` — same definition as `/usage`'s "Total tokens" |
+| `Raw` | `input_tokens` — uncached input. The "fresh prompt" tokens, no cache reads, no cache writes. |
+| `Cache` | `cache_creation_input_tokens + cache_read_input_tokens` — both halves of the prompt cache combined. Usually dwarfs `Raw`. |
+| `Out` | `output_tokens` — what the model generated. |
+| `Billable` | `Raw + Out` — same definition as `/usage`'s "Total tokens". |
+| `Messages` | Count of assistant records in that window. |
+| `Sessions` | Distinct JSONL files (≈ sessions) that contributed to that window. |
 
-`bill` is the column to compare against the `/usage` Stats screen inside
-Claude Code. Values format with exactly two decimals (`3.06M`, `12.40K`)
-for consistent column widths.
+Three rows: `Today` (today, local timezone), `Week` (last 7 days inclusive of today), `Lifetime` (every assistant message on disk).
+
+`Billable` is the column to compare against the `/usage` Stats screen
+inside Claude Code. Values format with exactly two decimals (`3.06M`,
+`12.40K`) for consistent column widths.
 
 ### Stats
 
