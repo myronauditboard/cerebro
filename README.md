@@ -192,8 +192,12 @@ The layout has three levels of selection:
 3. **Per-agent left nav** — the agent itself, then each of its sub-agents.
 
 Each chip is identified by `session_id` so it survives session-id
-rotation and works for finished sessions that have no PID. The right
-pane shows the detail for whichever nav item is selected.
+rotation and works for finished sessions that have no PID. Live and
+finished chips look identical in the row (both dim when inactive,
+violet block when active); the difference shows up once you select
+one — finished sessions display a magenta `[finished]` status badge in
+the detail pane, live ones show `[working]` / `[active]` / etc. The
+right pane shows the detail for whichever nav item is selected.
 
 ```
    Enhance Annotate fe…   surface-subagents-c…   Check current date   Explain a Python fu…
@@ -223,7 +227,9 @@ back to a flat per-agent block list.
 
 For a **live agent** (the underlying claude process is still running):
 
-- Header line: `* PID … [status] last activity Ns ago`
+- Header line: `PID … [status] last activity Ns ago` — prefixed with
+  `*` if this session is the one whose process tree contains the
+  cerebro you launched.
 - Session name, `repo (branch) · tty … · age …`, session id stub, last
   event excerpt.
 - **Recent interactions** — up to the last 10 prompt/response pairs
