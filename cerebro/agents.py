@@ -260,7 +260,14 @@ def _read_until_n_user_records(
 ) -> list[dict]:
     """Walk the jsonl backwards in chunks until we have ≥ target user-text records,
     or we hit the start of the file, or we've read max_bytes. Returns records in
-    chronological order. Avoids pulling huge sessions in full."""
+    chronological order. Avoids pulling huge sessions in full.
+
+    Records can span chunk boundaries (a single jsonl line may exceed the 256 KB
+    chunk size — long prompts, big tool_results, multi-image attachments). To
+    reconstruct those correctly, accumulate the read bytes across iterations and
+    re-parse the merged buffer each time, dropping only the very first partial
+    line until we've reached the start of the file.
+    """
     try:
         size = path.stat().st_size
     except OSError:
@@ -268,10 +275,11 @@ def _read_until_n_user_records(
     if size == 0:
         return []
 
-    parsed: list[dict] = []  # newest chunks at the front; we prepend earlier chunks
+    parsed: list[dict] = []
     user_count = 0
     pos = size
     bytes_read = 0
+    accum: list[bytes] = []  # chunks in file order — earliest at index 0
     try:
         with path.open("rb") as f:
             while pos > 0 and bytes_read < max_bytes:
@@ -281,19 +289,23 @@ def _read_until_n_user_records(
                 data = f.read(read_len)
                 pos = new_pos
                 bytes_read += read_len
+                accum.insert(0, data)  # this chunk is earlier than everything we have
 
-                # Drop the first (partial) line unless we've reached the start.
+                merged = b"".join(accum)
+                # Until we've reached BOF, the first line is potentially partial — drop it.
                 if pos > 0:
-                    nl = data.find(b"\n")
+                    nl = merged.find(b"\n")
                     if nl < 0:
-                        # No line boundary in this chunk — keep going.
-                        continue
-                    chunk_text = data[nl + 1 :].decode("utf-8", errors="ignore")
+                        continue  # no line boundary anywhere yet, keep accumulating
+                    text = merged[nl + 1 :].decode("utf-8", errors="ignore")
                 else:
-                    chunk_text = data.decode("utf-8", errors="ignore")
+                    text = merged.decode("utf-8", errors="ignore")
 
-                chunk_records: list[dict] = []
-                for line in chunk_text.split("\n"):
+                # Re-parse from scratch each iteration (cheap vs jsonl read cost,
+                # and necessary for lines that span chunk boundaries).
+                parsed = []
+                user_count = 0
+                for line in text.split("\n"):
                     line = line.strip()
                     if not line:
                         continue
@@ -301,11 +313,9 @@ def _read_until_n_user_records(
                         r = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    chunk_records.append(r)
+                    parsed.append(r)
                     if _is_user_text_record(r):
                         user_count += 1
-                # Earlier chunks go to the front
-                parsed = chunk_records + parsed
                 if user_count >= target:
                     break
     except OSError:
