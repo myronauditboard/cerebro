@@ -135,7 +135,7 @@ def render_stats_cache(sc: StatsCacheSummary, width: int) -> list[str]:
     most_day = sc.most_active_day.strftime("%b %-d") if sc.most_active_day else "—"
     first_d = sc.first_session_date.strftime("%b %-d, %Y") if sc.first_session_date else "—"
     rows = [
-        _table_row("Period", "Tokens", "Messages", "Sessions"),
+        _table_row("Period", "Tokens", "Messages", "Sessions", "Detail"),
         _table_row(
             "Today",
             fmt_count(sc.today_tokens),
@@ -177,7 +177,7 @@ def render_activity(summary: TokenSummary, width: int) -> list[str]:
     most_n = fmt_count(act.most_active_day_billable) if act.most_active_day_billable else "0"
     streak = act.current_streak
     rows = [
-        _table_row("Period", "Billable", "Messages", "Sessions"),
+        _table_row("Period", "Billable", "Messages", "Sessions", "Detail"),
         _table_row(
             "Today",
             fmt_count(today.billable_tokens),
