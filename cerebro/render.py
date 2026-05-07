@@ -193,31 +193,34 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
     repo_w = max(4, min(28, max((len(s.repo) for s in sessions), default=4)))
     branch_w = max(6, min(32, max((len(s.branch) for s in sessions), default=6)))
     tty_w = max(3, max((len(s.tty) for s in sessions), default=3))
+    sess_w = max(
+        7,
+        min(24, max((len(s.name or s.resume_id or "") for s in sessions), default=7)),
+    )
 
     header = (
         "   "
         + "PID".ljust(7)
         + "AGE".ljust(8)
+        + "SESSION".ljust(sess_w + 2)
         + "REPO".ljust(repo_w + 2)
         + "BRANCH".ljust(branch_w + 2)
         + "TTY".ljust(tty_w + 2)
-        + "SESSION"
     )
     lines = [BOLD + header + RESET]
 
     for s in sessions:
         marker = "* " if s.is_current else "  "
-        sess_label = s.name or s.resume_id
-        sess = _truncate(sess_label, 9) if sess_label else "-"
+        sess_label = s.name or s.resume_id or "-"
         row = (
             marker
             + " "
             + str(s.pid).ljust(7)
             + s.age.ljust(8)
+            + _truncate(sess_label, sess_w).ljust(sess_w + 2)
             + _truncate(s.repo, repo_w).ljust(repo_w + 2)
             + _truncate(s.branch or "-", branch_w).ljust(branch_w + 2)
             + s.tty.ljust(tty_w + 2)
-            + sess
         )
         if s.is_current:
             row = BOLD + row + RESET
