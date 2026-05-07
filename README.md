@@ -1,14 +1,21 @@
 # cerebro
 
-Live CLI dashboard for Claude Code activity. Shows every running `claude`
-session at a glance, aggregates token usage across all your past sessions,
-and surfaces what each session is doing right now.
+Live CLI dashboard for Claude Code activity. Aggregates token usage
+across all your sessions, lists every running `claude` process, and
+surfaces a recent-activity feed of the last 10 sessions (live or
+finished, including `claude -p` runs) with their prompts and
+responses.
 
 ## What you get
 
-Two tabs in a refreshing TUI: **Overview** (token usage + a session table)
-and **Agents** (per-session detail with current activity). Click a tab in
-the header or press `1` / `2`.
+Two tabs in a refreshing TUI:
+- **Overview** — token panels (`Tokens`, `Live`, `/usage`) plus a table
+  of the currently-running `claude` processes.
+- **Agents** — the 10 most-recently-active sessions, ranked by JSONL
+  mtime. Each session's full prompt/response history, queued prompts,
+  and any sub-agents it spawned.
+
+Click a tab in the header or press `1` / `2`.
 
 ```
 cerebro — claude code activity
@@ -170,52 +177,55 @@ refresh. Having both visible side by side makes the drift legible.
 
 ## Agents tab
 
-Per-session detail view. For every running `claude` process, cerebro
-reads `~/.claude/sessions/<pid>.json` for the auto-named session label,
-then tails the matching jsonl in `~/.claude/projects/<encoded-cwd>/` to
-extract what each session is doing, what prompts have been sent, and
-which sub-agents have been spawned.
+Recent-activity view, ranked by JSONL mtime. Cerebro enumerates every
+top-level transcript under `~/.claude/projects/**/*.jsonl`, sorts by
+mtime descending, and shows the most-recent **10 sessions** — live and
+finished mixed. This includes `claude -p` (oneshot) runs that finished
+between refreshes; they surface as soon as they touched disk.
 
 The layout has three levels of selection:
 
 1. **Top tabs** (`Overview` / `Agents`) — same as before.
-2. **Agent sub-tabs** — one chip per running session, labeled with the
-   session name (PID fallback). Active chip gets the violet block.
+2. **Agent sub-tabs** — one chip per recent session, labeled with the
+   session name (then ai-title, then session-id stub). Active chip gets
+   the violet block.
 3. **Per-agent left nav** — the agent itself, then each of its sub-agents.
 
-The right pane shows the detail for whichever nav item is selected.
+Each chip is identified by `session_id` so it survives session-id
+rotation and works for finished sessions that have no PID. The right
+pane shows the detail for whichever nav item is selected.
 
 ```
-   surface-subagents-cer…   move-fieldwork-but…   PID 23593   PID 24953
-   ────────────────────────
+   Enhance Annotate fe…   surface-subagents-c…   Check current date   Explain a Python fu…
+   ────────────────────
 
-   ▸ ⌂ surface-subagents-cer…   │ * PID 59143  [working]  last activity 2s ago
-     Explore  cerebro surfacing │   surface-subagents-cerebro
-     Explore  fetch jsonl tail  │   cerebro  (main)  ·  tty ttys020  ·  age 5d
-                                │   session 63e1a1d3…
-                                │   now: tool_use: Edit  ·  cerebro/render.py
-                                │
-                                │   Recent interactions
-                                │   You · 14:35 · queued
-                                │     also add an MRU sort to the table
-                                │   AI · waiting in queue
-                                │
-                                │   You · 14:32
-                                │     Can you make the text in cerebro copy-able?
-                                │   AI · 14:33 · 3 tools
-                                │     I'll add a select-mode toggle that pauses…
+   ▸ ⌂ Enhance Annotate fe…   │ * PID 9329  [working]  last activity 4s ago
+     Explore  jsonl tail      │   Enhance Annotate feature with test procedures parsing and import
+                              │   Development  ·  tty ttys011  ·  age 4h42m
+                              │   session 8c67fed8…
+                              │   now: assistant_text · Let me pause the test up
+                              │
+                              │   Recent interactions
+                              │   You · 14:35 · queued
+                              │     also add an MRU sort to the table
+                              │   AI · waiting in queue
+                              │
+                              │   You · 14:32
+                              │     Can you make the text in cerebro copy-able?
+                              │   AI · 14:33 · 3 tools
+                              │     I'll add a select-mode toggle that pauses…
 ```
 
 When the terminal is narrower than 70 cols, the split view collapses
-back to a flat per-agent block list (each block: header + repo + branch
-+ session id + last event + sub-agents inline).
+back to a flat per-agent block list.
 
 ### Detail pane
 
-For the **agent itself** (nav row 1):
+For a **live agent** (the underlying claude process is still running):
 
-- Header line: `PID … [status] last activity Ns ago`
-- Session name, repo / branch / tty / age, session id, last event excerpt.
+- Header line: `* PID … [status] last activity Ns ago`
+- Session name, `repo (branch) · tty … · age …`, session id stub, last
+  event excerpt.
 - **Recent interactions** — up to the last 10 prompt/response pairs
   newest-first. Each entry shows `You · HH:MM` + the prompt, then
   `AI · HH:MM · N tools` + the assistant's final reply (`in progress` if
@@ -227,7 +237,15 @@ For the **agent itself** (nav row 1):
   feed tagged `queued` with `AI · waiting in queue` — derived from
   Claude Code's `queue-operation` records.
 
-For a **sub-agent** (any subsequent nav row):
+For a **finished agent** (jsonl exists, but no live process matches):
+
+- Header line: `session <stub>… [finished] last activity Nm ago`
+- ai-title (if Claude wrote one) and `repo (branch)` — no tty/age
+  because the process is gone.
+- Same Recent interactions feed; for short `claude -p` runs this is
+  typically a single pair (the prompt + response).
+
+For a **sub-agent** (any nav row past the first):
 
 - Header line: `Agent[<type>] [status] last activity Ns ago` plus its
   description.
@@ -241,7 +259,8 @@ For a **sub-agent** (any subsequent nav row):
 Every Agent-tool invocation produces a dedicated transcript at
 `~/.claude/projects/<encoded-cwd>/<sessionId>/subagents/agent-<id>.jsonl`
 plus a tiny `agent-<id>.meta.json` with `{agentType, description}`. For
-each running parent, cerebro lists those files and includes:
+each parent agent (live or finished), cerebro lists those files and
+includes:
 
 - All currently-active sub-agents (jsonl mtime within 60 s), plus
 - The 10 most-recent completed sub-agents (older mtimes).
@@ -253,27 +272,29 @@ on selection.
 
 | Status | Color | Meaning |
 |---|---|---|
-| `working` | green | jsonl write < 10s ago |
-| `waiting` | yellow | last record is `tool_use`, idle 10–60s (likely on a tool call) |
-| `active` | cyan | activity within last 2 minutes |
-| `idle` / `stale` / `unknown` | gray | quieter or no jsonl found |
+| `working` | green | live, jsonl write < 10s ago |
+| `waiting` | yellow | live, last record is `tool_use`, idle 10–60s (likely on a tool call) |
+| `active` | cyan | live, activity within last 2 minutes |
+| `idle` / `stale` / `unknown` | gray | live but quieter, or no jsonl found |
+| `finished` | magenta | the underlying claude process is gone — typical for `claude -p` runs |
 
-### Looking up the active jsonl
+### Identifying the live process behind a JSONL
 
-Claude Code can rotate a session's id mid-process (e.g. after `/clear`
-or compaction) and start writing to a new `<newId>.jsonl` in the same
-project directory, while `~/.claude/sessions/<pid>.json` keeps pointing
-at the old `sessionId`. To pick the right transcript:
+Cerebro starts from a JSONL (mtime-ranked top 10) and asks "is this
+file being written to by a running claude process right now?" To
+answer:
 
-1. Use the metadata file's `updatedAt` timestamp — it gets bumped on
-   every session pulse — and pick the jsonl in the cwd's project dir
-   whose mtime is closest to it. This handles rotation cleanly and also
-   disambiguates when multiple `claude` processes share a cwd (each
-   PID has its own `updatedAt`).
-2. If `updatedAt` isn't available, fall back to a sessionId match on
-   `--resume <id>` or `metadata.sessionId`.
-3. Then the most-recently-modified jsonl in the project dir.
-4. Finally, a cross-project sessionId scan.
+1. List running `claude` PIDs from `ps`.
+2. For each PID, read `~/.claude/sessions/<pid>.json` for its `cwd`
+   and `updatedAt`. The right transcript for that PID is the jsonl in
+   the cwd's project dir whose mtime is closest to `updatedAt` —
+   robust against session-id rotation (e.g. after `/clear` or
+   compaction) and to multiple `claude` processes sharing a cwd.
+3. If a top-10 JSONL matches one of those resolved paths, mark it
+   live and pull the live PID's tty/age/branch/etc. Otherwise it's
+   finished — derive `cwd`, `gitBranch`, and `sessionId` directly from
+   records inside the JSONL, and grab the auto-title from the latest
+   `ai-title` record.
 
 ## How it works
 
@@ -282,8 +303,9 @@ at the old `sessionId`. To pick the right transcript:
 | `ps -o pid,etime,tty,command -u $USER` | enumerate running `claude` PIDs |
 | `lsof -a -p <pid> -d cwd -Fn` | per-PID working directory |
 | `git -C <cwd> branch --show-current` | per-PID branch |
-| `~/.claude/projects/**/*.jsonl` | token aggregation, last-activity excerpt |
-| `~/.claude/sessions/<pid>.json` | auto-named session label, kind, sessionId |
+| `~/.claude/projects/**/*.jsonl` | token aggregation, Agents-tab enumeration (top 10 by mtime), last-activity excerpts, prompt/response history |
+| `~/.claude/projects/.../<sid>/subagents/agent-*.jsonl` | sub-agent transcripts (one per Agent-tool invocation) |
+| `~/.claude/sessions/<pid>.json` | live-process metadata (sessionId, name, cwd, updatedAt) used to mark which top-10 JSONLs are still live |
 | `~/.claude/stats-cache.json` | `/usage` panel (verbatim) |
 
 The detection filter excludes the `unblocked` MCP child processes and
