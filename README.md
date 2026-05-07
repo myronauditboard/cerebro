@@ -33,16 +33,22 @@ cerebro — claude code activity
 │  Favorite model       1.42M           —           —   claude-opus-4-7         │
 └───────────────────────────────────────────────────────────────────────────────┘
 
-   PID    AGE     SESSION                   REPO                 BRANCH                     TTY
-*  21554  4d20h   ml-auto-annotate-tachyon… auditboard-backend   auto-annotate-database-v0  ttys020
-   5063   4d21h   -                         auditboard-frontend  auto-annotate-database-v0  ttys011
+   PID    AGE     SESSION                   REPO                 TTY
+*  21554  4d20h   ml-auto-annotate-tachyon… auditboard-backend   ttys020
+   5063   4d21h   -                         auditboard-frontend  ttys011
    ...
 
   click a tab or [1]/[2]  ·  ↑↓ / wheel scroll  ·  [s] select  ·  [r] refresh  ·  [q] quit
 ```
 
-`*` marks the session whose process tree contains the cerebro you launched
-(works when invoked via `! cerebro` from inside a Claude session).
+Rows are sorted **most-recently-used first** using the `updatedAt`
+field of `~/.claude/sessions/<pid>.json`. The session in the cwd you
+just typed in lands at the top; sessions whose metadata has no
+`updatedAt` yet fall to the bottom in PID order. `*` marks the session
+whose process tree contains the cerebro you launched (works when
+invoked via `! cerebro` from inside a Claude session). Branch is no
+longer in this table — it's surfaced in the Agents-tab detail pane,
+where it's most useful.
 
 ## Install
 
