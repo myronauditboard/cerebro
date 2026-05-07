@@ -207,7 +207,8 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
 
     for s in sessions:
         marker = "* " if s.is_current else "  "
-        sess = _truncate(s.resume_id, 9) if s.resume_id else "-"
+        sess_label = s.name or s.resume_id
+        sess = _truncate(sess_label, 9) if sess_label else "-"
         row = (
             marker
             + " "

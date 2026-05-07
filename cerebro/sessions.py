@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 
 _CLAUDE_CMD_RE = re.compile(r"^claude($|[ ]|--)")
+_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 
 
 @dataclass
@@ -21,6 +24,7 @@ class Session:
     branch: str
     resume_id: str
     is_current: bool
+    name: str = ""    # session name from ~/.claude/sessions/<pid>.json
 
     def to_dict(self) -> dict:
         return {
@@ -32,7 +36,17 @@ class Session:
             "branch": self.branch,
             "resume_id": self.resume_id,
             "is_current": self.is_current,
+            "name": self.name,
         }
+
+
+def _session_name(pid: int) -> str:
+    p = _SESSIONS_DIR / f"{pid}.json"
+    try:
+        with p.open() as f:
+            return (json.load(f).get("name") or "").strip()
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 def _condense_etime(etime: str) -> str:
@@ -173,6 +187,7 @@ def list_sessions(include_branch: bool = True) -> list[Session]:
                 branch=branch,
                 resume_id=_resume_id(cmd),
                 is_current=(pid in ancestors),
+                name=_session_name(pid),
             )
         )
 
