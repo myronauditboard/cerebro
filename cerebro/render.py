@@ -594,10 +594,6 @@ def _render_agent_detail(
                 budget = max(20, width - _visible_len(line) - 5)
                 line += f"  {DIM}·{RESET}  {_trim(agent.last_event_detail, budget)}"
             out.append(line)
-        # Most recent user prompt for the parent agent
-        latest_prompt = agent.recent_interactions[-1].user_text if agent.recent_interactions else ""
-        out.append("")
-        out.extend(_render_prompt_section(latest_prompt, "you", width))
         out.append("")
         out.append(f"{BOLD}Recent interactions{RESET}")
         out.extend(_format_interactions(agent.recent_interactions, width, user_label="You"))
