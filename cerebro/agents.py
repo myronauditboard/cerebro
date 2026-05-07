@@ -37,6 +37,7 @@ class Interaction:
     assistant_ts: str
     tool_calls: int         # number of tool_use blocks issued in this turn
     in_progress: bool       # True if no final assistant text yet
+    queued: bool = False    # True if this is a pending queue-operation enqueue (not yet popped)
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +47,7 @@ class Interaction:
             "assistant_ts": self.assistant_ts,
             "tool_calls": self.tool_calls,
             "in_progress": self.in_progress,
+            "queued": self.queued,
         }
 
 
@@ -430,7 +432,7 @@ def _count_tool_uses(rec: dict) -> int:
 
 
 def _recent_interactions(
-    convo: list[dict], limit: int = 10, seed_prompt: str | None = None
+    records: list[dict], limit: int = 10, seed_prompt: str | None = None
 ) -> list[Interaction]:
     """Walk conversational records and pair them into prompt/response interactions.
 
@@ -439,14 +441,18 @@ def _recent_interactions(
     their tool_use count and final text to the in-progress interaction.
     Returns the most recent `limit` interactions in chronological order.
 
+    Pending queued prompts (`queue-operation` enqueues without a matching
+    `remove`) are surfaced as additional interactions at the end with
+    `queued=True`, so the user can see what's lined up while Claude is busy.
+
     If `seed_prompt` is given (sub-agent mode), produces exactly one interaction
-    pairing that prompt with the assistant activity in `convo`.
+    pairing that prompt with the assistant activity in `records`.
     """
     if seed_prompt is not None:
         tool_count = 0
         asst = ""
         asst_ts = ""
-        for rec in convo:
+        for rec in records:
             if rec.get("type") == "assistant":
                 tool_count += _count_tool_uses(rec)
                 t = _assistant_text_content(rec)
@@ -466,9 +472,19 @@ def _recent_interactions(
 
     interactions: list[Interaction] = []
     current: Interaction | None = None
-    for rec in convo:
+    pending_queue: list[tuple[str, str]] = []  # (content, timestamp) FIFO
+    for rec in records:
         rtype = rec.get("type")
-        if rtype == "user":
+        if rtype == "queue-operation":
+            op = rec.get("operation")
+            if op == "enqueue":
+                content = (rec.get("content") or "").strip()
+                if not content or _is_internal_user_stub(content):
+                    continue
+                pending_queue.append((content, rec.get("timestamp", "")))
+            elif op in ("dequeue", "remove") and pending_queue:
+                pending_queue.pop(0)  # FIFO — Claude pops/cancels the head
+        elif rtype == "user":
             user_text = _user_text_content(rec)
             if user_text:
                 if current is not None:
@@ -490,7 +506,21 @@ def _recent_interactions(
                 current.in_progress = False
     if current is not None:
         interactions.append(current)
-    return interactions[-limit:]
+
+    out = interactions[-limit:]
+    for content, ts in pending_queue:
+        out.append(
+            Interaction(
+                user_text=content,
+                user_ts=ts,
+                assistant_text="",
+                assistant_ts="",
+                tool_calls=0,
+                in_progress=True,
+                queued=True,
+            )
+        )
+    return out
 
 
 def _derive_status(records: list[dict], age_secs: int) -> str:
@@ -649,9 +679,10 @@ def list_agents() -> list[AgentDetail]:
             sub_agents = _list_sub_agents(jsonl, now)
             # Read further back to cover at least 10 user prompts. For long
             # sessions the 256 KB tail above only covers a handful of turns.
+            # Pass the full record stream so queue-operation events (pending
+            # queued prompts) come through alongside user/assistant records.
             deep_records = _read_until_n_user_records(jsonl, target=10)
-            deep_convo = [r for r in deep_records if r.get("type") in ("assistant", "user")]
-            recent = _recent_interactions(deep_convo)
+            recent = _recent_interactions(deep_records)
         else:
             status = "unknown"
             records = []

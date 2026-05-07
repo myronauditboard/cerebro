@@ -476,10 +476,19 @@ def _format_interactions(
         if i > 0:
             out.append("")
         ts_u = _short_ts(intr.user_ts)
-        u_meta = f" {DIM}· {ts_u}{RESET}" if ts_u else ""
+        u_meta_parts = []
+        if ts_u:
+            u_meta_parts.append(ts_u)
+        if intr.queued:
+            u_meta_parts.append(f"{CSI}33mqueued{RESET}{DIM}")
+        u_meta = f" {DIM}· {' · '.join(u_meta_parts)}{RESET}" if u_meta_parts else ""
         out.append(f"{BOLD}{user_label}{RESET}{u_meta}")
         for line in _wrap_plain(intr.user_text, body_w):
             out.append("  " + line)
+        # Queued items have no assistant side yet — Claude hasn't popped them.
+        if intr.queued:
+            out.append(f"{BOLD}AI{RESET} {DIM}· waiting in queue{RESET}")
+            continue
         ts_a = _short_ts(intr.assistant_ts)
         tools_str = (
             f"{intr.tool_calls} tool{'s' if intr.tool_calls != 1 else ''}"
