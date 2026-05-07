@@ -74,23 +74,39 @@ def _panel(title: str, lines: list[str], inner: int) -> list[str]:
 
 
 def render_summary(summary: TokenSummary, width: int) -> list[str]:
-    inner = max(60, width - 2)
+    inner = max(72, width - 2)
+    label_w = 10
+    num_w = 9
 
-    def line(b: Bucket) -> str:
+    def row(label: str, raw: str, cache: str, out: str, bill: str, msg: str, sess: str) -> str:
         return (
-            f"  {b.label.capitalize():<9}"
-            f"raw {fmt_count(b.raw_input_tokens):>7} · "
-            f"cache {fmt_count(b.cache_tokens):>7} · "
-            f"out {fmt_count(b.output_tokens):>7} · "
-            f"bill {fmt_count(b.billable_tokens):>7} · "
-            f"{b.msgs:>4} msg · {b.sessions:>3} sess"
+            f"  {label:<{label_w}}"
+            f"{raw:>{num_w}}  "
+            f"{cache:>{num_w}}  "
+            f"{out:>{num_w}}  "
+            f"{bill:>{num_w}}  "
+            f"{msg:>{num_w}}  "
+            f"{sess:>{num_w}}"
         )
 
-    return _panel(
-        "Tokens",
-        [line(summary.today), line(summary.week), line(summary.lifetime)],
-        inner,
-    )
+    def data_row(b: Bucket) -> str:
+        return row(
+            b.label.capitalize(),
+            fmt_count(b.raw_input_tokens),
+            fmt_count(b.cache_tokens),
+            fmt_count(b.output_tokens),
+            fmt_count(b.billable_tokens),
+            str(b.msgs),
+            str(b.sessions),
+        )
+
+    rows = [
+        row("Period", "Raw", "Cache", "Out", "Billable", "Messages", "Sessions"),
+        data_row(summary.today),
+        data_row(summary.week),
+        data_row(summary.lifetime),
+    ]
+    return _panel("Tokens", rows, inner)
 
 
 # Column widths for the table-style Stats and /usage panels.
