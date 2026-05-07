@@ -54,7 +54,7 @@ where it's most useful.
 ## Install
 
 ```bash
-git clone <this-repo> ~/Development/cerebro    # or `cp -r` if local
+git clone https://github.com/myronauditboard/cerebro.git ~/Development/cerebro
 cd ~/Development/cerebro
 ./install.sh
 exec zsh                  # pick up the new PATH line
@@ -195,14 +195,15 @@ The right pane shows the detail for whichever nav item is selected.
                                 │   session 63e1a1d3…
                                 │   now: tool_use: Edit  ·  cerebro/render.py
                                 │
-                                │   Prompt (from you)
-                                │   Can you make the text in cerebro copy-able?
-                                │
                                 │   Recent interactions
+                                │   You · 14:35 · queued
+                                │     also add an MRU sort to the table
+                                │   AI · waiting in queue
+                                │
                                 │   You · 14:32
-                                │     Can you also add this to each agent view…
+                                │     Can you make the text in cerebro copy-able?
                                 │   AI · 14:33 · 3 tools
-                                │     I'll add a Prompt section…
+                                │     I'll add a select-mode toggle that pauses…
 ```
 
 When the terminal is narrower than 70 cols, the split view collapses
@@ -215,13 +216,16 @@ For the **agent itself** (nav row 1):
 
 - Header line: `PID … [status] last activity Ns ago`
 - Session name, repo / branch / tty / age, session id, last event excerpt.
-- **Prompt (from you)** — the most recent user-text prompt, in full.
 - **Recent interactions** — up to the last 10 prompt/response pairs
   newest-first. Each entry shows `You · HH:MM` + the prompt, then
   `AI · HH:MM · N tools` + the assistant's final reply (`in progress` if
   the AI is still working). Cerebro reads the jsonl backward in 256 KB
   chunks until 10 user-text records are accumulated (or 16 MB cap), so
   long sessions display a real history rather than just the tail.
+- **Queued prompts** are surfaced too: if you type a second prompt while
+  Claude is still working on the first, it shows at the top of the
+  feed tagged `queued` with `AI · waiting in queue` — derived from
+  Claude Code's `queue-operation` records.
 
 For a **sub-agent** (any subsequent nav row):
 
