@@ -191,7 +191,6 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
         return [DIM + "  (no running claude sessions)" + RESET]
 
     repo_w = max(4, min(28, max((len(s.repo) for s in sessions), default=4)))
-    branch_w = max(6, min(32, max((len(s.branch) for s in sessions), default=6)))
     tty_w = max(3, max((len(s.tty) for s in sessions), default=3))
     sess_w = max(
         7,
@@ -204,7 +203,6 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
         + "AGE".ljust(8)
         + "SESSION".ljust(sess_w + 2)
         + "REPO".ljust(repo_w + 2)
-        + "BRANCH".ljust(branch_w + 2)
         + "TTY".ljust(tty_w + 2)
     )
     lines = [BOLD + header + RESET]
@@ -219,7 +217,6 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
             + s.age.ljust(8)
             + _truncate(sess_label, sess_w).ljust(sess_w + 2)
             + _truncate(s.repo, repo_w).ljust(repo_w + 2)
-            + _truncate(s.branch or "-", branch_w).ljust(branch_w + 2)
             + s.tty.ljust(tty_w + 2)
         )
         if s.is_current:
