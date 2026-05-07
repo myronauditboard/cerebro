@@ -24,7 +24,8 @@ class Session:
     branch: str
     resume_id: str
     is_current: bool
-    name: str = ""    # session name from ~/.claude/sessions/<pid>.json
+    name: str = ""              # session name from ~/.claude/sessions/<pid>.json
+    updated_at_ms: int = 0      # last `updatedAt` from the same file (0 if absent)
 
     def to_dict(self) -> dict:
         return {
@@ -37,16 +38,21 @@ class Session:
             "resume_id": self.resume_id,
             "is_current": self.is_current,
             "name": self.name,
+            "updated_at_ms": self.updated_at_ms,
         }
 
 
-def _session_name(pid: int) -> str:
+def _session_meta(pid: int) -> tuple[str, int]:
+    """Return (name, updated_at_ms) from ~/.claude/sessions/<pid>.json."""
     p = _SESSIONS_DIR / f"{pid}.json"
     try:
         with p.open() as f:
-            return (json.load(f).get("name") or "").strip()
-    except (OSError, json.JSONDecodeError):
-        return ""
+            d = json.load(f)
+        name = (d.get("name") or "").strip()
+        updated = int(d.get("updatedAt") or 0)
+        return (name, updated)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return ("", 0)
 
 
 def _condense_etime(etime: str) -> str:
@@ -177,6 +183,7 @@ def list_sessions(include_branch: bool = True) -> list[Session]:
         cwd = _cwd_for(pid)
         repo = os.path.basename(cwd) if cwd else ""
         branch = _branch_for(cwd) if include_branch else ""
+        name, updated_at_ms = _session_meta(pid)
         sessions.append(
             Session(
                 pid=pid,
@@ -187,9 +194,12 @@ def list_sessions(include_branch: bool = True) -> list[Session]:
                 branch=branch,
                 resume_id=_resume_id(cmd),
                 is_current=(pid in ancestors),
-                name=_session_name(pid),
+                name=name,
+                updated_at_ms=updated_at_ms,
             )
         )
 
-    sessions.sort(key=lambda s: (not s.is_current, s.pid))
+    # Most recently used first. `is_current` and `pid` are tiebreakers so
+    # sessions with no metadata file (updated_at_ms = 0) still order stably.
+    sessions.sort(key=lambda s: (-s.updated_at_ms, not s.is_current, s.pid))
     return sessions
