@@ -20,14 +20,14 @@ cerebro — claude code activity
 │  Week         14.64K    664.94M      3.05M      3.06M       2605          5   │
 │  Lifetime     30.77K      1.27B      4.39M      4.43M       6662         63   │
 └───────────────────────────────────────────────────────────────────────────────┘
-┌─────────────────────────────────── Stats ─────────────────────────────────────┐
-│  Period            Billable    Messages    Sessions                           │
+┌─────────────────────────────────── Live ──────────────────────────────────────┐
+│  Period            Billable    Messages    Sessions   Detail                  │
 │  Today               98.39K          77           2                           │
 │  Most active          1.48M           —           —   Apr 24, streak 2d       │
 │  Favorite model       3.41M           —           —   claude-opus-4-7         │
 └───────────────────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────── /usage ────────────────────────────────────┐
-│  Period              Tokens    Messages    Sessions                           │
+│  Period              Tokens    Messages    Sessions   Detail                  │
 │  Today              367.32K         573           2                           │
 │  Total                3.06M        9244          63   since Mar 26, 2026      │
 │  Most active        551.60K           —           —   Apr 16, streak 1d       │
@@ -146,22 +146,27 @@ Three rows: `Today` (today, local timezone), `Week` (last 7 days inclusive of to
 inside Claude Code. Values format with exactly two decimals (`3.06M`,
 `12.40K`) for consistent column widths.
 
-### Stats
+### Live
 
-Aggregate facts derived from the same jsonl scan as Tokens. Today row,
-most-active day, favorite model. All values are billable tokens for
-direct comparison with the Tokens panel above.
+Aggregate facts derived from the same jsonl scan as Tokens, recomputed
+on every refresh. Today row, most-active day, favorite model. All
+values are billable tokens for direct comparison with the Tokens panel
+above. The trailing `Detail` column carries the row's identifying note
+(which day, which model).
 
 ### `/usage`
 
-Reads `~/.claude/stats-cache.json` directly — the same source `/usage`
-Stats reads from inside Claude Code. Numbers match `/usage` exactly
-(within the cache's recompute cadence).
+Reads `~/.claude/stats-cache.json` directly — the same source the
+`/usage` Stats screen inside Claude Code reads from. Numbers match
+`/usage` exactly (within the cache's recompute cadence).
 
-Disagreement between the Stats and `/usage` panels means the stats cache
-is stale relative to the underlying jsonl files, not that either is wrong
-— Claude Code recomputes the cache lazily, while cerebro re-reads jsonl
-every refresh. Having both visible side by side makes the drift legible.
+**Live vs. /usage**: same shape, different sources. `Live` is cerebro's
+own jsonl-derived numbers, recomputed every refresh. `/usage` is
+Claude Code's pre-computed cache, recomputed lazily. Disagreement
+between the two means the stats cache is stale relative to the
+underlying jsonl files, not that either is wrong — Claude Code
+recomputes the cache lazily, while cerebro re-reads jsonl every
+refresh. Having both visible side by side makes the drift legible.
 
 ## Agents tab
 
@@ -285,7 +290,7 @@ steady-state refreshes are essentially free.
 ## Out of scope (for now)
 
 - Cost / dollar conversion (different models, different rates, needs care)
-- Cache-token breakdown in the Stats / `/usage` panels
+- Cache-token breakdown in the Live / `/usage` panels
 - Interactive selection / attach (e.g. `cerebro attach <pid>`)
 - Cross-machine view, daemon mode, history graphs
 
@@ -298,7 +303,7 @@ cerebro/
 │   ├── __main__.py         argparse dispatch
 │   ├── sessions.py         ps/lsof/git enumeration of running PIDs
 │   ├── agents.py           per-session detail (Agents tab data source)
-│   ├── tokens.py           incremental jsonl aggregator (Tokens + Stats)
+│   ├── tokens.py           incremental jsonl aggregator (Tokens + Live)
 │   ├── stats_cache.py      ~/.claude/stats-cache.json reader (/usage panel)
 │   └── render.py           ANSI render loop, tab nav, mouse + scroll input
 ├── install.sh

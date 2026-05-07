@@ -199,7 +199,7 @@ def render_activity(summary: TokenSummary, width: int) -> list[str]:
             fav_label,
         ),
     ]
-    return _panel("Stats", rows, inner)
+    return _panel("Live", rows, inner)
 
 
 def render_table(sessions: Sequence[Session], width: int) -> list[str]:
