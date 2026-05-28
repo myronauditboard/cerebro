@@ -31,6 +31,49 @@ RESET = f"{CSI}0m"
 MOUSE_ON = f"{CSI}?1000h{CSI}?1006h"
 MOUSE_OFF = f"{CSI}?1000l{CSI}?1006l"
 
+
+# ── Theme palettes ─────────────────────────────────────────────────────────
+# Every theme-sensitive ANSI string lives in here so adding a new theme later
+# means adding one dict entry — no hunting through render code. BOLD/DIM/RESET
+# stay theme-neutral (SGR attributes, not color codes).
+#
+# Right now there's only "dark" — the values are exactly what cerebro emitted
+# before this refactor, so the rendered output is byte-identical. Light theme
+# and a runtime toggle are intentionally deferred.
+_PALETTES: dict[str, dict[str, str]] = {
+    "dark": {
+        "status_working":  f"{CSI}32m",       # green
+        "status_waiting":  f"{CSI}33m",       # yellow
+        "status_active":   f"{CSI}36m",       # cyan
+        "status_idle":     f"{CSI}90m",       # bright black
+        "status_stale":    f"{CSI}90m",
+        "status_finished": f"{CSI}35m",       # magenta — "process gone"
+        "status_unknown":  f"{CSI}90m",
+        "tab_active":      f"{CSI}48;5;60m{CSI}1;97m",   # violet bg + white bold fg
+        "subtab_active":   f"{CSI}48;5;60m{CSI}1;97m",   # same — sub-tab chips track tabs
+        "warning":         f"{CSI}33m",       # yellow (select-mode ribbon)
+        "queued":          f"{CSI}33m",       # yellow (queued-prompt tag)
+    },
+}
+
+_THEME: str = "dark"
+
+
+def set_theme(name: str) -> None:
+    """Switch the active palette. No-op on unknown names."""
+    global _THEME
+    if name in _PALETTES:
+        _THEME = name
+
+
+def get_theme() -> str:
+    return _THEME
+
+
+def _p(key: str) -> str:
+    """Look up an ANSI string in the active palette. `""` for missing keys."""
+    return _PALETTES[_THEME].get(key, "")
+
 TABS = ["overview", "agents"]
 TAB_ROW = 2          # 1-indexed terminal row where the tab header lives
 TAB_PREFIX = "  "    # 2-char left margin before the first tab
@@ -242,15 +285,7 @@ def render_table(sessions: Sequence[Session], width: int) -> list[str]:
 
 
 def _status_color(status: str) -> str:
-    return {
-        "working": f"{CSI}32m",   # green
-        "waiting": f"{CSI}33m",   # yellow
-        "active": f"{CSI}36m",    # cyan
-        "idle": f"{CSI}90m",      # bright black
-        "stale": f"{CSI}90m",
-        "finished": f"{CSI}35m",  # magenta — distinguishes "process gone" from "live but quiet"
-        "unknown": f"{CSI}90m",
-    }.get(status, "")
+    return _p(f"status_{status}")
 
 
 def _fmt_age(secs: int) -> str:
@@ -381,8 +416,7 @@ def render_tabs_header(active_id: str, names: Sequence[str] = TABS) -> str:
     for i, name in enumerate(names):
         display = TAB_DISPLAY.get(name, name.capitalize())
         if name == active_id:
-            # Active: violet background + white bold text
-            parts.append(f"{CSI}48;5;60m{CSI}1;97m {display} {RESET}")
+            parts.append(f"{_p('tab_active')} {display} {RESET}")
         else:
             parts.append(f"{DIM} {display} {RESET}")
         if i < len(names) - 1:
@@ -454,7 +488,7 @@ def render_agent_subtabs(
         chip_w = len(label) + 2  # one space on each side
         key = _agent_key(a)
         if key == active_id:
-            parts.append(f"{CSI}48;5;60m{CSI}1;97m {label} {RESET}")
+            parts.append(f"{_p('subtab_active')} {label} {RESET}")
         else:
             # Finished agents render slightly more dim to distinguish at a glance.
             parts.append(f"{DIM} {label} {RESET}")
@@ -493,7 +527,7 @@ def _format_interactions(
         if ts_u:
             u_meta_parts.append(ts_u)
         if intr.queued:
-            u_meta_parts.append(f"{CSI}33mqueued{RESET}{DIM}")
+            u_meta_parts.append(f"{_p('queued')}queued{RESET}{DIM}")
         u_meta = f" {DIM}· {' · '.join(u_meta_parts)}{RESET}" if u_meta_parts else ""
         out.append(f"{BOLD}{user_label}{RESET}{u_meta}")
         for line in _wrap_plain(intr.user_text, body_w):
@@ -716,7 +750,7 @@ def render_frame(
         # Selection mode: refresh paused, mouse tracking off so the terminal can
         # do native click-drag selection. Make the state obvious in the footer.
         out.append(
-            f"  {CSI}33m⚠ select mode{RESET}{DIM}"
+            f"  {_p('warning')}⚠ select mode{RESET}{DIM}"
             f"  ·  refresh paused, drag to select / copy normally  ·  "
             f"[s] resume  ·  [q] quit{RESET}"
         )
