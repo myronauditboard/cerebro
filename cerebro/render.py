@@ -13,6 +13,7 @@ import time
 import tty
 from typing import Sequence
 
+from . import term_ctl
 from .agents import AgentDetail, Interaction, SubAgentDetail, list_agents
 from .sessions import Session, list_sessions
 from .stats_cache import StatsCacheSummary
@@ -751,6 +752,8 @@ def render_frame(
     nav_index: int,
     width: int,
     mouse_enabled: bool = True,
+    kill_pending_pid: int | None = None,
+    status_msg: str | None = None,
 ) -> tuple[str, int, list[tuple[int, int, int, str]]]:
     """Render a complete frame.
 
@@ -759,6 +762,9 @@ def render_frame(
     grows to match so the split-view body below stays correctly pinned.
     Click ranges include the absolute terminal row of each agent tab so
     the live loop's hit-testing keeps working across the wrapped rows.
+
+    Transient footer states (in order of priority): select-mode ribbon,
+    kill-confirm ribbon, status-flash message, normal footer.
     """
     out: list[str] = []
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
@@ -796,11 +802,18 @@ def render_frame(
             f"  ·  refresh paused, drag to select / copy normally  ·  "
             f"[s] resume  ·  [q] quit{RESET}"
         )
+    elif kill_pending_pid is not None:
+        out.append(
+            f"  {_p('warning')}⚠ kill PID {kill_pending_pid}?{RESET}{DIM}"
+            f"  press K again to confirm (3 s){RESET}"
+        )
+    elif status_msg:
+        out.append(f"  {DIM}{status_msg}{RESET}")
     else:
         if tab == "agents":
             footer = (
                 "  click a tab/agent or [1]/[2] · h/l agent · j/k nav · "
-                "[s] select · [r] refresh · [q] quit"
+                "[o] open · [K] kill · [s] select · [r] refresh · [q] quit"
             )
         else:
             footer = (
@@ -958,6 +971,10 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
     # Selection mode: when False, mouse tracking is off and refresh is paused so
     # the terminal's native click-drag selection works for copy/paste.
     mouse_state = {"on": True}
+    # Kill confirm: first `K` press sets this; second `K` within 3s sends SIGTERM.
+    kill_pending: dict | None = None         # {"pid": int, "expires_at": float}
+    # Transient footer flash for non-confirm messages ("opened terminal" etc.).
+    status_msg: dict | None = None           # {"text": str, "expires_at": float}
     # Hoisted across iterations so the input-handler closures retain a valid
     # reference while the refresh is paused in select mode.
     agents: list[AgentDetail] = []
@@ -1012,6 +1029,12 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                         nav_indices[active_agent_id] = max(0, min(cur, max_idx))
 
                 nav_index = nav_indices.get(active_agent_id, 0) if active_agent_id is not None else 0
+                # Expire transient footer states before rendering.
+                now_ts = time.time()
+                if kill_pending and kill_pending["expires_at"] < now_ts:
+                    kill_pending = None
+                if status_msg and status_msg["expires_at"] < now_ts:
+                    status_msg = None
                 frame, sticky_top, subtab_ranges = render_frame(
                     tab=tab,
                     summary=summary,
@@ -1022,6 +1045,8 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                     nav_index=nav_index,
                     width=cols,
                     mouse_enabled=mouse_state["on"],
+                    kill_pending_pid=kill_pending["pid"] if kill_pending else None,
+                    status_msg=status_msg["text"] if status_msg else None,
                 )
                 view, clamped, _max_offset = _apply_scroll(
                     frame, term_rows, scroll_offsets[tab], sticky_top=sticky_top
@@ -1059,6 +1084,56 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 scroll_offsets[tab] = 0
                 needs_redraw["flag"] = True
 
+            def _active_agent() -> AgentDetail | None:
+                if active_agent_id is None:
+                    return None
+                return next(
+                    (a for a in agents if _agent_key(a) == active_agent_id), None
+                )
+
+            def _flash(text: str, secs: float = 1.5) -> None:
+                nonlocal status_msg
+                status_msg = {"text": text, "expires_at": time.time() + secs}
+                needs_redraw["flag"] = True
+
+            def _handle_open() -> None:
+                a = _active_agent()
+                if a is None:
+                    _flash("no agent selected")
+                    return
+                resume_cmd = (
+                    f"claude --resume {a.session_id}" if a.session_id else None
+                )
+                # Live agent with a known TTY → try to focus that terminal first.
+                if a.is_live and a.tty and term_ctl.focus_tty(a.tty):
+                    _flash(f"focused {a.tty}")
+                    return
+                # Otherwise open a new terminal at the cwd.
+                if a.cwd and term_ctl.open_at(a.cwd, command=resume_cmd):
+                    _flash(f"opened new terminal at {a.cwd}")
+                else:
+                    _flash("could not open terminal")
+
+            def _request_kill() -> None:
+                nonlocal kill_pending
+                a = _active_agent()
+                if a is None or a.pid is None:
+                    _flash("no live process to kill")
+                    kill_pending = None
+                    return
+                if kill_pending and kill_pending["pid"] == a.pid:
+                    # Second press within the window → confirm.
+                    try:
+                        os.kill(a.pid, signal.SIGTERM)
+                        _flash(f"sent SIGTERM to PID {a.pid}")
+                    except (OSError, ProcessLookupError) as e:
+                        _flash(f"kill failed: {e}")
+                    kill_pending = None
+                    needs_redraw["flag"] = True
+                    return
+                kill_pending = {"pid": a.pid, "expires_at": time.time() + 3.0}
+                needs_redraw["flag"] = True
+
             # Wait for either input or the refresh interval, whichever comes first
             slept = 0.0
             slice_s = 0.2
@@ -1086,6 +1161,17 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                         # terminal's text selection. Only `s` (resume) and `q`
                         # (quit) above are honored.
                         if in_select:
+                            continue
+                        # Capital K — kill the active agent (with confirm).
+                        if ch == "K":
+                            _request_kill()
+                            continue
+                        # Any other key cancels a pending kill confirm.
+                        if kill_pending is not None:
+                            kill_pending = None
+                            needs_redraw["flag"] = True
+                        if ch in ("o", "O"):
+                            _handle_open()
                             continue
                         if ch == "1":
                             _switch("overview")
