@@ -445,7 +445,10 @@ SUBTAB_PREFIX = "  "
 SUBTAB_SEPARATOR = "  "
 SUBTAB_LABEL_MAX = 20      # max chars of session name before truncation
 SUBTAB_LABEL_FALLBACK = "PID {pid}"
-SUBTAB_ROW = 4             # 1-indexed terminal row where the sub-tab header lives
+# Where the sub-tab block starts vertically (1-indexed terminal row). It can
+# now span multiple rows when chips wrap; absolute click rows are computed in
+# render_frame against this base.
+SUBTAB_FIRST_ROW = 4
 SPLIT_MIN_WIDTH = 70       # below this, fall back to the flat list renderer
 SPLIT_NAV_WIDTH = 32       # left pane width
 SPLIT_GAP = " │ "          # column separator between nav and detail
@@ -472,87 +475,62 @@ def _agent_key(a: AgentDetail) -> str:
 
 def render_agent_subtabs(
     agents: Sequence[AgentDetail], active_id: str | None, width: int
-) -> tuple[str, list[tuple[int, int, str]]]:
-    """Render the per-agent sub-tab row and return (rendered_string, click_ranges).
+) -> tuple[str, list[tuple[int, int, int, str]], int]:
+    """Render the per-agent sub-tab block and return
+    `(rendered_text, click_ranges, num_rows)`.
 
-    Each click_range is (col_start, col_end, agent_id), 1-indexed inclusive,
-    where agent_id is the session_id (or pid-fallback) of the chip.
+    The block self-wraps across as many rows as needed to fit every chip;
+    render_frame stretches the sticky-top region to match `num_rows` so the
+    split view below stays aligned regardless of how many chips there are.
+
+    Each click_range is `(row_within_block, col_start, col_end, agent_id)`
+    with row 0-indexed from the block's first row and cols 1-indexed
+    inclusive. render_frame translates row offsets to absolute terminal
+    rows before handing the ranges to the click handler.
     """
     if not agents:
-        return (DIM + "  (no recent claude sessions)" + RESET, [])
+        return (DIM + "  (no recent claude sessions)" + RESET, [], 1)
 
-    # Decide which chips fit in the available width before rendering. The
-    # chip row is sticky-pinned at the top, so if it overflows the terminal
-    # the terminal hard-wraps it onto extra visual rows and the body
-    # alignment below breaks. Drop chips that don't fit; append a "+N more"
-    # marker so the user knows others exist; always keep the active chip in
-    # view (swap it into the last visible slot if it'd otherwise be dropped).
     chip_widths = [len(_agent_label(a)) + 2 for a in agents]  # incl. side padding
     sep_w = len(SUBTAB_SEPARATOR)
     prefix_w = len(SUBTAB_PREFIX)
-    # Find the active index (if any) so we can ensure it's never dropped.
     keys = [_agent_key(a) for a in agents]
-    active_idx = keys.index(active_id) if active_id in keys else -1
 
-    def overflow_marker(hidden: int) -> str:
-        # Rendered like a chip but tagged dim, never click-targeted.
-        return f" +{hidden} more "
-
-    # Pack chips left-to-right until the next one wouldn't fit. We reserve
-    # space for a worst-case marker (`+99 more` ≈ 10 chars + separator).
-    reserve = len(" +99 more ") + sep_w
-    visible_idx: list[int] = []
-    used = prefix_w
+    # Pack chips greedily across rows. A chip never gets split — if it
+    # wouldn't fit on the current row, start a new one.
+    rows: list[list[int]] = [[]]      # each entry is the list of chip indices for that row
+    row_used: list[int] = [prefix_w]
     for i, w in enumerate(chip_widths):
-        next_used = used + (sep_w if visible_idx else 0) + w
-        # Reserve space for an overflow marker IF there will be more chips after.
-        will_overflow = next_used + (reserve if i < len(chip_widths) - 1 else 0) > width
-        if will_overflow:
-            break
-        visible_idx.append(i)
-        used = next_used
-
-    # If active was dropped, swap it into the last visible slot so the user
-    # can always see what they're focused on.
-    if active_idx >= 0 and active_idx not in visible_idx and visible_idx:
-        # Replace the last visible chip with the active one — width is similar
-        # enough that the row still fits in nearly every case (active label
-        # already ≤ SUBTAB_LABEL_MAX). If the active is wider, drop one more
-        # chip until it fits.
-        target = chip_widths[active_idx]
-        while visible_idx and used - chip_widths[visible_idx[-1]] + target > width - reserve:
-            used -= chip_widths[visible_idx.pop()] + (sep_w if visible_idx else 0)
-        if visible_idx:
-            replaced = visible_idx[-1]
-            used = used - chip_widths[replaced] + target
-            visible_idx[-1] = active_idx
+        cur = rows[-1]
+        used = row_used[-1]
+        addition = (sep_w if cur else 0) + w
+        if cur and used + addition > width:
+            rows.append([i])
+            row_used.append(prefix_w + w)
         else:
-            visible_idx = [active_idx]
-            used = prefix_w + target
+            cur.append(i)
+            row_used[-1] = used + addition
 
-    parts: list[str] = [SUBTAB_PREFIX]
-    ranges: list[tuple[int, int, str]] = []
-    col = prefix_w + 1  # 1-indexed
-    for slot, i in enumerate(visible_idx):
-        a = agents[i]
-        label = _agent_label(a)
-        chip_w = chip_widths[i]
-        key = keys[i]
-        if key == active_id:
-            parts.append(f"{_p('subtab_active')} {label} {RESET}")
-        else:
-            parts.append(f"{DIM} {label} {RESET}")
-        ranges.append((col, col + chip_w - 1, key))
-        col += chip_w
-        if slot < len(visible_idx) - 1:
-            parts.append(SUBTAB_SEPARATOR)
-            col += sep_w
-
-    hidden = len(agents) - len(visible_idx)
-    if hidden > 0:
-        parts.append(SUBTAB_SEPARATOR)
-        parts.append(f"{DIM}{overflow_marker(hidden)}{RESET}")
-    return ("".join(parts), ranges)
+    lines: list[str] = []
+    ranges: list[tuple[int, int, int, str]] = []
+    for r, row in enumerate(rows):
+        parts: list[str] = [SUBTAB_PREFIX]
+        col = prefix_w + 1   # 1-indexed
+        for slot, i in enumerate(row):
+            label = _agent_label(agents[i])
+            chip_w = chip_widths[i]
+            key = keys[i]
+            if key == active_id:
+                parts.append(f"{_p('subtab_active')} {label} {RESET}")
+            else:
+                parts.append(f"{DIM} {label} {RESET}")
+            ranges.append((r, col, col + chip_w - 1, key))
+            col += chip_w
+            if slot < len(row) - 1:
+                parts.append(SUBTAB_SEPARATOR)
+                col += sep_w
+        lines.append("".join(parts))
+    return ("\n".join(lines), ranges, len(rows))
 
 
 def _short_ts(iso: str) -> str:
@@ -772,28 +750,36 @@ def render_frame(
     nav_index: int,
     width: int,
     mouse_enabled: bool = True,
-) -> tuple[str, int, list[tuple[int, int, str]]]:
+) -> tuple[str, int, list[tuple[int, int, int, str]]]:
     """Render a complete frame.
 
-    Returns (frame_text, sticky_top_lines, subtab_click_ranges). The sub-tab row is
-    sticky so it stays visible while the body scrolls; the live loop uses
-    sticky_top_lines and the click ranges to keep mouse hit-testing correct.
+    Returns (frame_text, sticky_top_lines, subtab_click_ranges). The sub-tab
+    block self-wraps across as many rows as it needs; `sticky_top_lines`
+    grows to match so the split-view body below stays correctly pinned.
+    Click ranges include the absolute terminal row of each chip so the
+    live loop's hit-testing keeps working across the wrapped rows.
     """
     out: list[str] = []
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
     out.append(render_tabs_header(tab))
     out.append("")
-    subtab_ranges: list[tuple[int, int, str]] = []
+    subtab_ranges: list[tuple[int, int, int, str]] = []
     sticky_top = _STICKY_TOP
     if tab == "agents":
-        subtab_line, subtab_ranges = render_agent_subtabs(agents, active_id, width)
-        out.append(subtab_line)
+        subtab_block, rel_ranges, subtab_rows = render_agent_subtabs(
+            agents, active_id, width
+        )
+        out.append(subtab_block)
         out.append("")
-        sticky_top = _STICKY_TOP + 2
+        sticky_top = _STICKY_TOP + subtab_rows + 1
+        # Translate chip ranges' row offsets to absolute terminal rows.
+        subtab_ranges = [
+            (SUBTAB_FIRST_ROW + r, c1, c2, key) for (r, c1, c2, key) in rel_ranges
+        ]
         # Body
         active = next((a for a in agents if _agent_key(a) == active_id), None)
         if not agents:
-            pass  # subtab_line already says "(no running claude sessions)"
+            pass  # subtab_block already says "(no running claude sessions)"
         elif width < SPLIT_MIN_WIDTH or active is None:
             out.extend(render_agents(agents, width))
         else:
@@ -966,7 +952,7 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
     # agents.
     active_agent_id: str | None = None
     nav_indices: dict[str, int] = {}        # agent_key → nav_index
-    subtab_ranges: list[tuple[int, int, str]] = []
+    subtab_ranges: list[tuple[int, int, int, str]] = []
     last_term_rows = {"v": 24}
     # Selection mode: when False, mouse tracking is off and refresh is paused so
     # the terminal's native click-drag selection works for copy/paste.
@@ -1167,9 +1153,11 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                                 if c_start <= col <= c_end:
                                     _switch(name)
                                     break
-                        elif button == 0 and on_agents and row == SUBTAB_ROW:
-                            for c_start, c_end, key in subtab_ranges:
-                                if c_start <= col <= c_end:
+                        elif button == 0 and on_agents:
+                            # Chip row may span multiple lines; each range
+                            # carries its absolute terminal row.
+                            for r, c_start, c_end, key in subtab_ranges:
+                                if row == r and c_start <= col <= c_end:
                                     if key != active_agent_id:
                                         active_agent_id = key
                                         scroll_offsets[tab] = 0
