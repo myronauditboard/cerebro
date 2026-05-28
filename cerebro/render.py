@@ -50,7 +50,7 @@ _PALETTES: dict[str, dict[str, str]] = {
         "status_finished": f"{CSI}35m",       # magenta — "process gone"
         "status_unknown":  f"{CSI}90m",
         "tab_active":      f"{CSI}48;5;60m{CSI}1;97m",   # violet bg + white bold fg
-        "subtab_active":   f"{CSI}48;5;60m{CSI}1;97m",   # same — sub-tab chips track tabs
+        "subtab_active":   f"{CSI}48;5;60m{CSI}1;97m",   # same — agent tabs match top tabs
         "warning":         f"{CSI}33m",       # yellow (select-mode ribbon)
         "queued":          f"{CSI}33m",       # yellow (queued-prompt tag)
     },
@@ -446,8 +446,8 @@ SUBTAB_SEPARATOR = "  "
 SUBTAB_LABEL_MAX = 20      # max chars of session name before truncation
 SUBTAB_LABEL_FALLBACK = "PID {pid}"
 # Where the sub-tab block starts vertically (1-indexed terminal row). It can
-# now span multiple rows when chips wrap; absolute click rows are computed in
-# render_frame against this base.
+# now span multiple rows when agent tabs wrap; absolute click rows are computed
+# in render_frame against this base.
 SUBTAB_FIRST_ROW = 4
 SPLIT_MIN_WIDTH = 70       # below this, fall back to the flat list renderer
 SPLIT_NAV_WIDTH = 32       # left pane width
@@ -476,12 +476,13 @@ def _agent_key(a: AgentDetail) -> str:
 def render_agent_subtabs(
     agents: Sequence[AgentDetail], active_id: str | None, width: int
 ) -> tuple[str, list[tuple[int, int, int, str]], int]:
-    """Render the per-agent sub-tab block and return
+    """Render the per-agent tab block and return
     `(rendered_text, click_ranges, num_rows)`.
 
-    The block self-wraps across as many rows as needed to fit every chip;
-    render_frame stretches the sticky-top region to match `num_rows` so the
-    split view below stays aligned regardless of how many chips there are.
+    The block self-wraps across as many rows as needed to fit every agent
+    tab; render_frame stretches the sticky-top region to match `num_rows`
+    so the split view below stays aligned regardless of how many tabs
+    there are.
 
     Each click_range is `(row_within_block, col_start, col_end, agent_id)`
     with row 0-indexed from the block's first row and cols 1-indexed
@@ -491,16 +492,16 @@ def render_agent_subtabs(
     if not agents:
         return (DIM + "  (no recent claude sessions)" + RESET, [], 1)
 
-    chip_widths = [len(_agent_label(a)) + 2 for a in agents]  # incl. side padding
+    tab_widths = [len(_agent_label(a)) + 2 for a in agents]  # incl. side padding
     sep_w = len(SUBTAB_SEPARATOR)
     prefix_w = len(SUBTAB_PREFIX)
     keys = [_agent_key(a) for a in agents]
 
-    # Pack chips greedily across rows. A chip never gets split — if it
+    # Pack agent tabs greedily across rows. A tab never gets split — if it
     # wouldn't fit on the current row, start a new one.
-    rows: list[list[int]] = [[]]      # each entry is the list of chip indices for that row
+    rows: list[list[int]] = [[]]      # each entry is the list of tab indices for that row
     row_used: list[int] = [prefix_w]
-    for i, w in enumerate(chip_widths):
+    for i, w in enumerate(tab_widths):
         cur = rows[-1]
         used = row_used[-1]
         addition = (sep_w if cur else 0) + w
@@ -518,14 +519,14 @@ def render_agent_subtabs(
         col = prefix_w + 1   # 1-indexed
         for slot, i in enumerate(row):
             label = _agent_label(agents[i])
-            chip_w = chip_widths[i]
+            tab_w = tab_widths[i]
             key = keys[i]
             if key == active_id:
                 parts.append(f"{_p('subtab_active')} {label} {RESET}")
             else:
                 parts.append(f"{DIM} {label} {RESET}")
-            ranges.append((r, col, col + chip_w - 1, key))
-            col += chip_w
+            ranges.append((r, col, col + tab_w - 1, key))
+            col += tab_w
             if slot < len(row) - 1:
                 parts.append(SUBTAB_SEPARATOR)
                 col += sep_w
@@ -756,8 +757,8 @@ def render_frame(
     Returns (frame_text, sticky_top_lines, subtab_click_ranges). The sub-tab
     block self-wraps across as many rows as it needs; `sticky_top_lines`
     grows to match so the split-view body below stays correctly pinned.
-    Click ranges include the absolute terminal row of each chip so the
-    live loop's hit-testing keeps working across the wrapped rows.
+    Click ranges include the absolute terminal row of each agent tab so
+    the live loop's hit-testing keeps working across the wrapped rows.
     """
     out: list[str] = []
     out.append(BOLD + "cerebro" + RESET + DIM + " — claude code activity" + RESET)
@@ -772,7 +773,7 @@ def render_frame(
         out.append(subtab_block)
         out.append("")
         sticky_top = _STICKY_TOP + subtab_rows + 1
-        # Translate chip ranges' row offsets to absolute terminal rows.
+        # Translate agent-tab ranges' row offsets to absolute terminal rows.
         subtab_ranges = [
             (SUBTAB_FIRST_ROW + r, c1, c2, key) for (r, c1, c2, key) in rel_ranges
         ]
@@ -946,7 +947,7 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
     tab_ranges = tab_layout()
     # Per-tab scroll offset so switching back to a tab restores its position.
     scroll_offsets: dict[str, int] = {name: 0 for name in TABS}
-    # Agents-tab state: which agent's chip is active and which nav item is
+    # Agents-tab state: which agent tab is active and which nav item is
     # selected within that agent (0 = the agent itself, 1+ = its sub-agents).
     # Keyed by `_agent_key(agent)` (session_id) since pid is None for finished
     # agents.
@@ -1154,8 +1155,8 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                                     _switch(name)
                                     break
                         elif button == 0 and on_agents:
-                            # Chip row may span multiple lines; each range
-                            # carries its absolute terminal row.
+                            # The agent-tab block may span multiple rows;
+                            # each range carries its absolute terminal row.
                             for r, c_start, c_end, key in subtab_ranges:
                                 if row == r and c_start <= col <= c_end:
                                     if key != active_agent_id:
