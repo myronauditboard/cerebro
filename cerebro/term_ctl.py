@@ -91,8 +91,12 @@ tell application "Terminal"
   repeat with w in windows
     repeat with t in tabs of w
       if tty of t is "{tty}" then
-        close t
-        return "closed"
+        if (count of tabs of w) is 1 then
+          close w saving no
+          return "closed"
+        else
+          return "multi_tab"
+        end if
       end if
     end repeat
   end repeat
