@@ -480,23 +480,78 @@ def render_agent_subtabs(
     """
     if not agents:
         return (DIM + "  (no recent claude sessions)" + RESET, [])
+
+    # Decide which chips fit in the available width before rendering. The
+    # chip row is sticky-pinned at the top, so if it overflows the terminal
+    # the terminal hard-wraps it onto extra visual rows and the body
+    # alignment below breaks. Drop chips that don't fit; append a "+N more"
+    # marker so the user knows others exist; always keep the active chip in
+    # view (swap it into the last visible slot if it'd otherwise be dropped).
+    chip_widths = [len(_agent_label(a)) + 2 for a in agents]  # incl. side padding
+    sep_w = len(SUBTAB_SEPARATOR)
+    prefix_w = len(SUBTAB_PREFIX)
+    # Find the active index (if any) so we can ensure it's never dropped.
+    keys = [_agent_key(a) for a in agents]
+    active_idx = keys.index(active_id) if active_id in keys else -1
+
+    def overflow_marker(hidden: int) -> str:
+        # Rendered like a chip but tagged dim, never click-targeted.
+        return f" +{hidden} more "
+
+    # Pack chips left-to-right until the next one wouldn't fit. We reserve
+    # space for a worst-case marker (`+99 more` ≈ 10 chars + separator).
+    reserve = len(" +99 more ") + sep_w
+    visible_idx: list[int] = []
+    used = prefix_w
+    for i, w in enumerate(chip_widths):
+        next_used = used + (sep_w if visible_idx else 0) + w
+        # Reserve space for an overflow marker IF there will be more chips after.
+        will_overflow = next_used + (reserve if i < len(chip_widths) - 1 else 0) > width
+        if will_overflow:
+            break
+        visible_idx.append(i)
+        used = next_used
+
+    # If active was dropped, swap it into the last visible slot so the user
+    # can always see what they're focused on.
+    if active_idx >= 0 and active_idx not in visible_idx and visible_idx:
+        # Replace the last visible chip with the active one — width is similar
+        # enough that the row still fits in nearly every case (active label
+        # already ≤ SUBTAB_LABEL_MAX). If the active is wider, drop one more
+        # chip until it fits.
+        target = chip_widths[active_idx]
+        while visible_idx and used - chip_widths[visible_idx[-1]] + target > width - reserve:
+            used -= chip_widths[visible_idx.pop()] + (sep_w if visible_idx else 0)
+        if visible_idx:
+            replaced = visible_idx[-1]
+            used = used - chip_widths[replaced] + target
+            visible_idx[-1] = active_idx
+        else:
+            visible_idx = [active_idx]
+            used = prefix_w + target
+
     parts: list[str] = [SUBTAB_PREFIX]
     ranges: list[tuple[int, int, str]] = []
-    col = len(SUBTAB_PREFIX) + 1  # 1-indexed
-    for i, a in enumerate(agents):
+    col = prefix_w + 1  # 1-indexed
+    for slot, i in enumerate(visible_idx):
+        a = agents[i]
         label = _agent_label(a)
-        chip_w = len(label) + 2  # one space on each side
-        key = _agent_key(a)
+        chip_w = chip_widths[i]
+        key = keys[i]
         if key == active_id:
             parts.append(f"{_p('subtab_active')} {label} {RESET}")
         else:
-            # Finished agents render slightly more dim to distinguish at a glance.
             parts.append(f"{DIM} {label} {RESET}")
         ranges.append((col, col + chip_w - 1, key))
         col += chip_w
-        if i < len(agents) - 1:
+        if slot < len(visible_idx) - 1:
             parts.append(SUBTAB_SEPARATOR)
-            col += len(SUBTAB_SEPARATOR)
+            col += sep_w
+
+    hidden = len(agents) - len(visible_idx)
+    if hidden > 0:
+        parts.append(SUBTAB_SEPARATOR)
+        parts.append(f"{DIM}{overflow_marker(hidden)}{RESET}")
     return ("".join(parts), ranges)
 
 
