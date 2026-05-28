@@ -1123,11 +1123,22 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                     return
                 if kill_pending and kill_pending["pid"] == a.pid:
                     # Second press within the window → confirm.
+                    killed = False
                     try:
                         os.kill(a.pid, signal.SIGTERM)
-                        _flash(f"sent SIGTERM to PID {a.pid}")
+                        killed = True
                     except (OSError, ProcessLookupError) as e:
                         _flash(f"kill failed: {e}")
+                    if killed:
+                        # Also close the owning terminal tab so the now-empty
+                        # shell doesn't linger. Best-effort — if we can't
+                        # address the tab (unknown terminal), we still report
+                        # the SIGTERM as the primary action.
+                        closed = bool(a.tty) and term_ctl.close_tty(a.tty)
+                        if closed:
+                            _flash(f"killed PID {a.pid} and closed {a.tty}")
+                        else:
+                            _flash(f"sent SIGTERM to PID {a.pid}")
                     kill_pending = None
                     needs_redraw["flag"] = True
                     return

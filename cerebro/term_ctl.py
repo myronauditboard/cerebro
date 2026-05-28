@@ -70,6 +70,36 @@ tell application "Terminal"
 end tell
 '''
 
+_CLOSE_ITERM2 = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          close s
+          return "closed"
+        end if
+      end repeat
+    end repeat
+  end repeat
+  return "not_found"
+end tell
+'''
+
+_CLOSE_TERMINAL = '''
+tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        close t
+        return "closed"
+      end if
+    end repeat
+  end repeat
+  return "not_found"
+end tell
+'''
+
 
 def _run_osa(script: str) -> str | None:
     """Run an AppleScript via osascript. Returns stdout (stripped) or None on
@@ -119,6 +149,33 @@ def focus_tty(tty: str) -> bool:
     for script in candidates:
         result = _run_osa(script.format(tty=target))
         if result == "focused":
+            return True
+    return False
+
+
+def close_tty(tty: str) -> bool:
+    """Close the terminal tab/session owning `tty`. Returns True on success.
+
+    Used after killing an agent so the now-empty shell window doesn't sit
+    around. iTerm2 closes just the session/pane; Terminal.app closes the tab
+    (which may close the whole window if it was the only tab). For unknown
+    terminals we don't know how to address tabs programmatically, so this
+    is best-effort and returns False — the user can close the window
+    themselves.
+    """
+    if not tty:
+        return False
+    target = tty if tty.startswith("/dev/") else f"/dev/{tty}"
+    candidates: list[str] = []
+    if TERM_PROGRAM == "iTerm.app":
+        candidates = [_CLOSE_ITERM2, _CLOSE_TERMINAL]
+    elif TERM_PROGRAM == "Apple_Terminal":
+        candidates = [_CLOSE_TERMINAL, _CLOSE_ITERM2]
+    else:
+        candidates = [_CLOSE_ITERM2, _CLOSE_TERMINAL]
+    for script in candidates:
+        result = _run_osa(script.format(tty=target))
+        if result == "closed":
             return True
     return False
 
