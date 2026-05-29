@@ -433,6 +433,30 @@ def _visible_len(s: str) -> int:
     return len(_ANSI_RE.sub("", s))
 
 
+def _trim_visible(s: str, max_visible: int) -> str:
+    """Trim `s` so its visible (printed-column) length is ≤ max_visible, while
+    preserving ANSI escape sequences inline. Used on footers to keep them from
+    wrapping onto a second visual row, which would scroll the title off the top.
+    """
+    if max_visible <= 0:
+        return ""
+    out: list[str] = []
+    visible = 0
+    pos = 0
+    while pos < len(s):
+        m = _ANSI_RE.match(s, pos)
+        if m:
+            out.append(m.group(0))
+            pos = m.end()
+            continue
+        if visible >= max_visible:
+            return "".join(out)
+        out.append(s[pos])
+        visible += 1
+        pos += 1
+    return "".join(out)
+
+
 def _pad_visible(s: str, width: int) -> str:
     """Right-pad `s` so its visible length is `width` (no truncation)."""
     diff = width - _visible_len(s)
@@ -794,33 +818,38 @@ def render_frame(
     else:
         out.extend(render_overview(summary, sessions, stats_cache, width))
     out.append("")
+    # Build the footer line and ALWAYS truncate it to terminal width before
+    # appending. A wrap would push our pinned title off the top of the screen
+    # because cerebro's frame is sized to exactly fill term_rows; one extra
+    # visual row at the bottom forces the terminal to scroll.
     if not mouse_enabled:
         # Selection mode: refresh paused, mouse tracking off so the terminal can
         # do native click-drag selection. Make the state obvious in the footer.
-        out.append(
+        footer_line = (
             f"  {_p('warning')}⚠ select mode{RESET}{DIM}"
             f"  ·  refresh paused, drag to select / copy normally  ·  "
             f"[s] resume  ·  [q] quit{RESET}"
         )
     elif kill_pending_pid is not None:
-        out.append(
+        footer_line = (
             f"  {_p('warning')}⚠ kill PID {kill_pending_pid}?{RESET}{DIM}"
             f"  press K again to confirm (3 s){RESET}"
         )
     elif status_msg:
-        out.append(f"  {DIM}{status_msg}{RESET}")
+        footer_line = f"  {DIM}{status_msg}{RESET}"
     else:
         if tab == "agents":
             footer = (
-                "  click a tab/agent or [1]/[2] · h/l agent · j/k nav · "
-                "[o] open · [K] kill · [s] select · [r] refresh · [q] quit"
+                "  [1]/[2] · h/l agent · j/k nav · [o] open · [K] kill · "
+                "[s] select · [r] refresh · [q] quit"
             )
         else:
             footer = (
-                "  click a tab or [1]/[2]  ·  ↑↓ / wheel scroll  ·  "
-                "[s] select  ·  [r] refresh  ·  [q] quit"
+                "  [1]/[2] · ↑↓ / wheel scroll · [s] select · "
+                "[r] refresh · [q] quit"
             )
-        out.append(DIM + footer + RESET)
+        footer_line = DIM + footer + RESET
+    out.append(_trim_visible(footer_line, width))
     return ("\n".join(out), sticky_top, subtab_ranges)
 
 
