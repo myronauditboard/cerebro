@@ -157,20 +157,19 @@ def focus_tty(tty: str) -> bool:
     return False
 
 
-def find_tty_at(cwd: str) -> str | None:
-    """Find a real (Terminal.app-visible) TTY whose foreground process is
-    sitting at `cwd` and return that TTY string.
+def find_ttys_at(cwd: str) -> list[str]:
+    """Return every real (non-`??`) TTY whose process is sitting at `cwd`.
 
-    Used to focus an existing terminal window when the agent's direct TTY
-    isn't addressable (finished agent with no live PID, claude launched by
-    VS Code with no TTY, claude started under tmux/screen on a non-shell
-    process, etc). We don't filter by command name — any process on a
-    real TTY whose cwd matches is a viable target. One batched lsof
-    call queries every candidate PID at once so this stays cheap even
-    with many open terminals.
+    Returns a list (preserving PID order from `ps`) so the caller can try
+    each candidate in turn. A TTY in this list may still be unaddressable
+    by Terminal.app / iTerm2 (e.g. inner tmux pty, SSH-spawned shell on
+    a remote machine that happens to share a path, lingering process
+    with a vanished window) — the caller is expected to call
+    `focus_tty(t)` on each in order and stop at the first one that
+    succeeds.
     """
     if not cwd:
-        return None
+        return []
     try:
         r = subprocess.run(
             ["ps", "-axwwo", "pid=,tty="],
@@ -179,9 +178,9 @@ def find_tty_at(cwd: str) -> str | None:
             timeout=3,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return []
     if r.returncode != 0:
-        return None
+        return []
 
     pid_to_tty: dict[int, str] = {}
     for line in r.stdout.splitlines():
@@ -196,7 +195,7 @@ def find_tty_at(cwd: str) -> str | None:
         except ValueError:
             continue
     if not pid_to_tty:
-        return None
+        return []
 
     pids = list(pid_to_tty.keys())
     try:
@@ -207,9 +206,11 @@ def find_tty_at(cwd: str) -> str | None:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return []
 
     # lsof -F output alternates `p<pid>` / `n<cwd>` blocks per process.
+    out: list[str] = []
+    seen: set[str] = set()
     current_pid: int | None = None
     for line in r.stdout.splitlines():
         if line.startswith("p"):
@@ -220,9 +221,10 @@ def find_tty_at(cwd: str) -> str | None:
         elif line.startswith("n") and current_pid is not None:
             if line[1:] == cwd:
                 tty = pid_to_tty.get(current_pid)
-                if tty:
-                    return tty
-    return None
+                if tty and tty not in seen:
+                    seen.add(tty)
+                    out.append(tty)
+    return out
 
 
 def close_tty(tty: str) -> bool:

@@ -1137,15 +1137,16 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 if a.is_live and a.tty and term_ctl.focus_tty(a.tty):
                     _flash(f"focused {a.tty}")
                     return
-                # Fallback: scan every process on a real TTY for one whose cwd
-                # matches the agent's cwd. Catches finished agents whose
-                # original window is still open, claude-in-tmux, claude
-                # launched by VS Code with no TTY, etc.
+                # Fallback: every process on a real TTY at the agent's cwd
+                # is a focus candidate. Try each in turn; some may live on
+                # TTYs Terminal.app / iTerm2 can't address (inner tmux pty,
+                # remote SSH session, lingering process whose window
+                # closed), so iterate until one focuses successfully.
                 if a.cwd:
-                    fallback_tty = term_ctl.find_tty_at(a.cwd)
-                    if fallback_tty and term_ctl.focus_tty(fallback_tty):
-                        _flash(f"focused {fallback_tty}")
-                        return
+                    for cand in term_ctl.find_ttys_at(a.cwd):
+                        if term_ctl.focus_tty(cand):
+                            _flash(f"focused {cand}")
+                            return
                 # No existing window matched — open a new terminal at the cwd.
                 if a.cwd and term_ctl.open_at(a.cwd, command=resume_cmd):
                     _flash(f"opened new terminal at {a.cwd}")
