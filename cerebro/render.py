@@ -1133,11 +1133,20 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 resume_cmd = (
                     f"claude --resume {a.session_id}" if a.session_id else None
                 )
-                # Live agent with a known TTY → try to focus that terminal first.
+                # Live agent with a known TTY → focus that terminal directly.
                 if a.is_live and a.tty and term_ctl.focus_tty(a.tty):
                     _flash(f"focused {a.tty}")
                     return
-                # Otherwise open a new terminal at the cwd.
+                # Finished agent (or live with no TTY): check whether a shell
+                # is still sitting at the agent's cwd. If so, the user's
+                # original window is still around — focus it instead of
+                # spawning a new one.
+                if a.cwd:
+                    shell_tty = term_ctl.find_shell_tty_at(a.cwd)
+                    if shell_tty and term_ctl.focus_tty(shell_tty):
+                        _flash(f"focused {shell_tty}")
+                        return
+                # No existing window matched — open a new terminal at the cwd.
                 if a.cwd and term_ctl.open_at(a.cwd, command=resume_cmd):
                     _flash(f"opened new terminal at {a.cwd}")
                 else:

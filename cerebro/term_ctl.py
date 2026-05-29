@@ -157,6 +157,62 @@ def focus_tty(tty: str) -> bool:
     return False
 
 
+def find_shell_tty_at(cwd: str) -> str | None:
+    """Find an interactive shell whose cwd matches `cwd` and return its TTY.
+
+    Used for finished agents whose claude PID is long gone but whose shell
+    is still sitting at the same directory. By matching on cwd we can focus
+    the *original* terminal window instead of spawning a new one.
+    """
+    if not cwd:
+        return None
+    # 1. Enumerate every interactive shell on a real TTY.
+    try:
+        r = subprocess.run(
+            ["ps", "-axwwo", "pid=,tty=,command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    shells: list[tuple[int, str]] = []
+    for line in r.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_s, tty, cmd = parts
+        if tty in ("??", "?", ""):
+            continue
+        # Match shells regardless of leading `-` (login shells) or full path.
+        base = cmd.split()[0].lstrip("-").rsplit("/", 1)[-1]
+        if base not in ("zsh", "bash", "fish", "sh"):
+            continue
+        try:
+            shells.append((int(pid_s), tty))
+        except ValueError:
+            continue
+    # 2. For each shell, ask lsof for its cwd. First match wins.
+    for pid, tty in shells:
+        try:
+            r = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode != 0:
+            continue
+        for ln in r.stdout.splitlines():
+            if ln.startswith("n") and ln[1:] == cwd:
+                return tty
+    return None
+
+
 def close_tty(tty: str) -> bool:
     """Close the terminal tab/session owning `tty`. Returns True on success.
 
