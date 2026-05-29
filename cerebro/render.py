@@ -1137,14 +1137,14 @@ def live(interval: float, include_branch: bool = True, tab: str = "overview") ->
                 if a.is_live and a.tty and term_ctl.focus_tty(a.tty):
                     _flash(f"focused {a.tty}")
                     return
-                # Finished agent (or live with no TTY): check whether a shell
-                # is still sitting at the agent's cwd. If so, the user's
-                # original window is still around — focus it instead of
-                # spawning a new one.
+                # Fallback: scan every process on a real TTY for one whose cwd
+                # matches the agent's cwd. Catches finished agents whose
+                # original window is still open, claude-in-tmux, claude
+                # launched by VS Code with no TTY, etc.
                 if a.cwd:
-                    shell_tty = term_ctl.find_shell_tty_at(a.cwd)
-                    if shell_tty and term_ctl.focus_tty(shell_tty):
-                        _flash(f"focused {shell_tty}")
+                    fallback_tty = term_ctl.find_tty_at(a.cwd)
+                    if fallback_tty and term_ctl.focus_tty(fallback_tty):
+                        _flash(f"focused {fallback_tty}")
                         return
                 # No existing window matched — open a new terminal at the cwd.
                 if a.cwd and term_ctl.open_at(a.cwd, command=resume_cmd):

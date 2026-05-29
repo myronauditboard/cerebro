@@ -157,19 +157,23 @@ def focus_tty(tty: str) -> bool:
     return False
 
 
-def find_shell_tty_at(cwd: str) -> str | None:
-    """Find an interactive shell whose cwd matches `cwd` and return its TTY.
+def find_tty_at(cwd: str) -> str | None:
+    """Find a real (Terminal.app-visible) TTY whose foreground process is
+    sitting at `cwd` and return that TTY string.
 
-    Used for finished agents whose claude PID is long gone but whose shell
-    is still sitting at the same directory. By matching on cwd we can focus
-    the *original* terminal window instead of spawning a new one.
+    Used to focus an existing terminal window when the agent's direct TTY
+    isn't addressable (finished agent with no live PID, claude launched by
+    VS Code with no TTY, claude started under tmux/screen on a non-shell
+    process, etc). We don't filter by command name — any process on a
+    real TTY whose cwd matches is a viable target. One batched lsof
+    call queries every candidate PID at once so this stays cheap even
+    with many open terminals.
     """
     if not cwd:
         return None
-    # 1. Enumerate every interactive shell on a real TTY.
     try:
         r = subprocess.run(
-            ["ps", "-axwwo", "pid=,tty=,command="],
+            ["ps", "-axwwo", "pid=,tty="],
             capture_output=True,
             text=True,
             timeout=3,
@@ -178,38 +182,46 @@ def find_shell_tty_at(cwd: str) -> str | None:
         return None
     if r.returncode != 0:
         return None
-    shells: list[tuple[int, str]] = []
+
+    pid_to_tty: dict[int, str] = {}
     for line in r.stdout.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3:
+        parts = line.strip().split()
+        if len(parts) != 2:
             continue
-        pid_s, tty, cmd = parts
+        pid_s, tty = parts
         if tty in ("??", "?", ""):
             continue
-        # Match shells regardless of leading `-` (login shells) or full path.
-        base = cmd.split()[0].lstrip("-").rsplit("/", 1)[-1]
-        if base not in ("zsh", "bash", "fish", "sh"):
-            continue
         try:
-            shells.append((int(pid_s), tty))
+            pid_to_tty[int(pid_s)] = tty
         except ValueError:
             continue
-    # 2. For each shell, ask lsof for its cwd. First match wins.
-    for pid, tty in shells:
-        try:
-            r = subprocess.run(
-                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if r.returncode != 0:
-            continue
-        for ln in r.stdout.splitlines():
-            if ln.startswith("n") and ln[1:] == cwd:
-                return tty
+    if not pid_to_tty:
+        return None
+
+    pids = list(pid_to_tty.keys())
+    try:
+        r = subprocess.run(
+            ["lsof", "-a", "-p", ",".join(map(str, pids)), "-d", "cwd", "-Fpn"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    # lsof -F output alternates `p<pid>` / `n<cwd>` blocks per process.
+    current_pid: int | None = None
+    for line in r.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                current_pid = int(line[1:])
+            except ValueError:
+                current_pid = None
+        elif line.startswith("n") and current_pid is not None:
+            if line[1:] == cwd:
+                tty = pid_to_tty.get(current_pid)
+                if tty:
+                    return tty
     return None
 
 
